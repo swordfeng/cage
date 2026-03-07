@@ -132,7 +132,7 @@ write_restricted_paths = ["$CWD/.git", "$CWD/.env"]
 read_restricted_paths = ["~/.ssh", "~/.aws", "~/.config", "~/.gnupg"]
 network = "none"
 [policies.strict.env]
-mode = "allowlist"                    # "allowlist" | "blocklist" | "inherit"
+mode = "allowlist"                    # "allowlist" | "blocklist"
 allow = ["PATH"]                      # for allowlist mode: only these vars
 # block = ["SECRET_*"]                # for blocklist mode: exclude these
 set = { CAGE = "1" }                  # always set these
@@ -165,6 +165,28 @@ set = { CAGE = "1" }
 # mode = "allowlist"
 # allow = ["PATH", "NODE_ENV"]
 # set = { CAGE = "1" }
+
+#### Variable expansion
+
+Path values in the config support variable expansion:
+
+| Variable | Description |
+|----------|-------------|
+| `$CWD` | **Runtime-computed** - the current working directory where `cage` was invoked |
+| `$VAR` | Environment variable lookup (platform-specific names) |
+| `~` | Home directory (expanded via standard shell rules) |
+
+**No cross-platform mapping:** Use platform-specific environment variable names. For example:
+
+```toml
+# Unix example
+writable_roots = ["$CWD", "$HOME/.cache", "$TMPDIR", "$XDG_CACHE_HOME"]
+
+# Windows example
+writable_roots = ["$CWD", "$USERPROFILE\\.cache", "$TEMP", "$LOCALAPPDATA"]
+```
+
+Variables are resolved at policy application time. If an environment variable is not set, it expands to an empty string (which may cause errors if the path becomes invalid).
 
 # ── Command to policy mappings ───────────────────────────────────────────────
 # Map specific commands to default policies. The first matching pattern is used.
@@ -268,7 +290,6 @@ pub enum NetworkPolicy {
 pub enum EnvMode {
     Allowlist,   // Only vars in `allow` are passed through
     Blocklist,   // All vars except those in `block` are passed through
-    Inherit,     // Pass through all parent env (dangerous, use with caution)
 }
 
 pub struct EnvPolicy {
@@ -327,9 +348,11 @@ impl Config {
 
 1. Open Landlock ruleset with `LANDLOCK_CREATE_RULESET`
 2. Add rules:
-   - `REFER + READ_FILE + READ_DIR` on `/` (read-anywhere by default)
-   - `WRITE_FILE + MAKE_*` only on whitelisted writable roots
+   - `READ_FILE + READ_DIR` on `/` (read-anywhere by default)
+   - `REFER + WRITE_FILE + MAKE_*` only on whitelisted writable roots
 3. `landlock_restrict_self()` — restrictions apply to this process and all children, cannot be removed
+   
+   **Note on `REFER`:** Hard links and cross-directory renames (e.g., `mv file /tmp/`) require the `REFER` right. We grant it only on writable roots (not globally on `/`) to prevent linking attacks. Add `/tmp` to `writable_roots` if you need cross-directory rename operations.
 4. Apply seccomp-BPF filter:
    - Allow all syscalls except: `connect(AF_INET)`, `connect(AF_INET6)` → return `EACCES`
    - Allow `connect(AF_UNIX)` (MCP sockets)
@@ -369,7 +392,9 @@ Bubblewrap requires either a setuid binary or unprivileged user namespaces (enab
 
 **Status:** `sandbox-exec` is marked deprecated in the man page since macOS 10.12, but the underlying kernel subsystem ("Seatbelt") powers all Apple system software and all major browsers. Claude Code, Codex CLI, and Cursor all use it in production as of 2025–2026. The SBPL profile language is the only viable lightweight option for macOS processes today.
 
-**How it works:** Generate an SBPL profile string at runtime based on `$CWD` and declared policy, then exec the agent via `sandbox-exec -p "$PROFILE" agent`.
+**How it works:** Generate an SBPL profile string at runtime based on `$CWD` and declared policy, then exec the agent via `/usr/bin/sandbox-exec -p "$PROFILE" agent`.
+
+**Security note:** Always use the hardcoded path `/usr/bin/sandbox-exec` (not just `sandbox-exec` from PATH). This defends against an attacker trying to inject a malicious version of the executable. If `/usr/bin/sandbox-exec` has been tampered with, the attacker already has root access.
 
 **Profile template (generated at runtime):**
 
@@ -451,7 +476,11 @@ CreateProcessWithToken(restricted_token, "agent.exe ...")
 [on exit]: Remove WFP rule, clean up ACLs
 ```
 
-**Vendoring:** `windows-sandbox-rs/src/lib.rs` exports `pub fn run_windows_sandbox_capture(...)` as a library entry point. Vendor this file, replace the `SandboxPolicy` type parameter with your own struct. The file is ~500 lines. Do not take a git dependency on the whole Codex workspace.
+**Implementation approach:** Implement our own Windows sandbox module based on this approach. The `windows-sandbox-rs` crate depends on internal Codex workspace crates (`codex-protocol`, `codex-utils-absolute-path`, etc.) that are not published to crates.io, so we cannot vendor just `lib.rs`. Instead, write our own module using the Windows APIs directly:
+
+- `windows` crate (v0.58) for `CreateRestrictedToken`, ACL functions, WFP APIs
+- `windows-sys` crate (v0.52) for lower-level system calls
+- Reference their implementation (~500 lines) for the approach, but use our own `SandboxPolicy` type
 
 **Alternatives rejected:**
 
@@ -488,13 +517,14 @@ Each `cage` session creates a temporary directory (`/tmp/cage-$PID/`) for sessio
 
 ### 6.2 Environment variable handling
 
-Environment variables are filtered using one of three modes:
+Environment variables are filtered using one of two modes:
 
 | Mode | Behavior | Use case |
 |---|---|---|
 | `allowlist` | Only variables matching `env.allow` patterns are passed through | Maximum security - explicit opt-in |
 | `blocklist` | All variables except those matching `env.block` are passed through | Convenient - only exclude sensitive vars |
-| `inherit` | All parent environment variables are passed through | Debugging only (dangerous) |
+
+To pass through all environment variables, use `mode = "blocklist"` with an empty `block` list.
 
 In all modes, `env.set` variables are always applied after filtering and override any inherited values.
 
@@ -512,12 +542,6 @@ mode = "blocklist"
 block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "AWS_*"]
 set = { CAGE = "1" }
 ```
-
-### 6.3 SSH key passthrough
-
-SSH private keys are **not** passed through by default. Use `--passthrough-ssh-keys` explicitly if the command needs to authenticate with remote repos.
-
-When enabled, only `~/.ssh/config` and `~/.ssh/known_hosts` are passed through read-only. Private keys remain inaccessible unless explicitly configured otherwise in the policy.
 
 ---
 
@@ -571,7 +595,6 @@ OPTIONS:
         --allow-network             Shorthand for --policy <current>+full-network
         --no-sandbox                Run command unsandboxed (logs a warning)
         --backend <BACKEND>         Linux only: landlock (default) | bwrap
-        --passthrough-ssh-keys      Include ~/.ssh private keys (read-only)
         --passthrough <PATH>        Add an extra read-only passthrough path (repeatable)
         --writable <PATH>           Add an extra writable root (repeatable)
         --write-restrict <PATH>     Add an extra write-restricted path (repeatable)
@@ -592,7 +615,19 @@ EXAMPLES:
 
 ---
 
-## 10. Implementation Roadmap
+## 10. Sandbox Escape Hatch (Phase 3)
+
+**Use case:** Allow agents to request execution of commands outside the sandbox for global operations (system package installs, global tool configuration, accessing credentials outside the project directory).
+
+**Two MCP tools:**
+- `escape_bash` - Execute command outside sandbox; approval via pattern matching + agentic review (deferred design)
+- `escape_bash_ask` - Always prompts user for approval; excluded from agent's default auto-approve rules
+
+**Security:** All escape calls are logged. Each call is limited to a single command execution. No scope restrictions (full host access when approved).
+
+---
+
+## 11. Implementation Roadmap
 
 ### Phase 1 — Core (implement first)
 
@@ -605,7 +640,6 @@ EXAMPLES:
 
 ### Phase 2 — Completeness
 
-- [ ] Linux: bubblewrap backend (`--backend bwrap`)
 - [ ] Windows: port `codex-rs/windows-sandbox-rs/src/lib.rs` (vendor, replace `SandboxPolicy`)
 - [ ] Windows: one-time `cage-setup` installer
 - [ ] Policy composition (`--policy a+b`)
@@ -615,14 +649,16 @@ EXAMPLES:
 
 ### Phase 3 — Advanced
 
+- [ ] Linux: bubblewrap backend (`--backend bwrap`) — stronger isolation with bind-mount remapping
 - [ ] Linux kernel ≥ 6.7: Landlock TCP port restrictions for surgical network policy
 - [ ] Network allowlist proxy mode (`network = "proxy"`) — route outbound through a domain-filtering HTTP proxy, similar to Claude Code's approach
 - [ ] macOS Containerization (macOS 26+): Linux container mode for agents that only need Linux toolchain (Node/Python/Go/Rust); not suitable for Xcode/iOS work
 - [ ] VM mode (`--isolation=vm`): Firecracker microVM for highest assurance; ~1–2s startup; suitable for CI
+- [ ] Sandbox escape hatch (`escape_bash`, `escape_bash_ask` MCP tools) — allow agents to request command execution outside sandbox with approval
 
 ---
 
-## 11. Dependency Strategy
+## 12. Dependency Strategy
 
 ### Use published crates (do not vendor from Codex)
 
@@ -641,9 +677,9 @@ windows = { version = "0.58", features = [
 
 macOS requires no crate — Seatbelt is just `std::process::Command::new("sandbox-exec")`.
 
-### Vendor selectively (Windows only)
+### Windows implementation
 
-Vendor `codex-rs/windows-sandbox-rs/src/lib.rs` (~500 lines) with your own `SandboxPolicy` struct substituted. Do not take the whole Codex workspace as a dependency.
+Implement our own Windows sandbox module using the `windows` and `windows-sys` crates. Reference the approach in `codex-rs/windows-sandbox-rs/` for the three-layer mechanism (restricted token, ACLs, WFP), but write our own code rather than vendoring (the Codex crate depends on internal workspace crates not available on crates.io).
 
 ### Why not use Codex crates directly
 
@@ -653,7 +689,7 @@ Vendor `codex-rs/windows-sandbox-rs/src/lib.rs` (~500 lines) with your own `Sand
 
 ---
 
-## 12. Security Notes
+## 13. Security Notes
 
 ### macOS Seatbelt degradation
 
@@ -672,7 +708,7 @@ Directories where `Everyone` has write access (notably `%TEMP%` and some shared 
 
 ### Credential passthrough hygiene
 
-- SSH private keys: not passed through by default; opt-in with `--passthrough-ssh-keys`
+- SSH private keys: not passed through by default
 - API keys: in `allowlist` mode, only explicitly allowed vars are passed through; in `blocklist` mode, use `env.block` patterns to exclude sensitive credentials
 - Config files: passed through read-only; originals are never made writable
 
@@ -680,7 +716,7 @@ Directories where `Everyone` has write access (notably `%TEMP%` and some shared 
 
 ---
 
-## 13. References
+## 14. References
 
 - Codex Linux sandbox: `openai/codex` → `codex-rs/linux-sandbox/` and `codex-rs/core/src/landlock.rs`
 - Codex macOS Seatbelt: `openai/codex` → `codex-rs/core/src/seatbelt.rs`
