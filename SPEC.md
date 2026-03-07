@@ -461,8 +461,7 @@ Based on the approach OpenAI open-sourced in `codex-rs/windows-sandbox-rs/` (mer
 **Layer 2 — NTFS ACLs**
 - Explicit ACEs grant write access to `$CWD` for the sandbox SID
 - Rest of the filesystem implicitly denies writes (restricted token cannot authenticate)
-- Caveat: directories where `Everyone` has write access (e.g., `%TEMP%`, some shared folders) cannot be blocked this way
-- Mitigation: inject stub executables for dangerous tools (`ssh`, `curl`, `powershell`) into `PATH` ahead of real executables
+- Caveat: directories where `Everyone` has write access (e.g., `%TEMP%`, some shared folders) cannot be blocked this way. Network-level blocking via WFP is the primary control for preventing data exfiltration.
 
 **Layer 3 — Windows Filtering Platform (WFP) Firewall Rules**
 - Outbound network blocked via WFP rules scoped to the sandbox user SID
@@ -639,25 +638,35 @@ EXAMPLES:
 
 ## 11. Implementation Roadmap
 
-### Phase 1 — Core (implement first)
+*Note: With agent coding assistance, Phase 1 can be completed in 5-7 weeks total (4-5 weeks for Phase 1a+1b).*
+
+### Phase 1a — Core Platforms (Weeks 1-3)
 
 - [ ] Policy config loading and merging
 - [ ] Environment setup and temp dir isolation (§6)
 - [ ] Linux: Landlock + seccomp using published `landlock` + `seccompiler` crates
 - [ ] macOS: Seatbelt profile generator + `sandbox-exec` exec
+- [ ] CLI interface and default policy
+- [ ] Variable expansion ($CWD, $VAR)
+
+### Phase 1b — Windows Support (Weeks 4-5)
+
+- [ ] Windows: Restricted Token implementation
+- [ ] Windows: ACL management layer
+- [ ] Windows: WFP firewall integration
+- [ ] Windows: `cage-setup.exe` installer (one-time, requires admin)
+- [ ] Windows: Testing and validation
 - [ ] MCP socket passthrough (all platforms)
 - [ ] Cleanup on exit (temp dirs, Windows firewall rules)
 
-### Phase 2 — Completeness
+### Phase 2 — Enhanced Features (Weeks 6-7)
 
-- [ ] Windows: port `codex-rs/windows-sandbox-rs/src/lib.rs` (vendor, replace `SandboxPolicy`)
-- [ ] Windows: one-time `cage-setup` installer
 - [ ] Policy composition (`--policy a+b`)
 - [ ] Command-to-policy mappings (`command_policy` in config)
 - [ ] Config validation (detect conflicting settings)
 - [ ] Structured audit log of denied accesses
 
-### Phase 3 — Advanced
+### Phase 3 — Advanced (Future)
 
 - [ ] Linux: bubblewrap backend (`--backend bwrap`) — stronger isolation with bind-mount remapping
 - [ ] Linux kernel ≥ 6.7: Landlock TCP port restrictions for surgical network policy
