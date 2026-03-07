@@ -126,6 +126,16 @@ $ cage opencode
 
 # ── Named policies ──────────────────────────────────────────────────────────
 
+[policies.default]
+writable_roots = ["$CWD", "$TMPDIR", "$HOME/.cache"]
+write_restricted_paths = ["$CWD/.git", "$CWD/.env", "$HOME/.ssh", "$HOME/.gnupg", "$HOME/.aws", "$HOME/.config"]
+read_restricted_paths = []
+network = "full"
+[policies.default.env]
+mode = "blocklist"
+block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "AWS_*", "GITHUB_*"]
+set = { CAGE = "1" }
+
 [policies.strict]
 writable_roots = ["$CWD"]
 write_restricted_paths = ["$CWD/.git", "$CWD/.env"]
