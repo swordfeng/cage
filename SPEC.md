@@ -7,7 +7,7 @@
 
 ## 1. Overview
 
-`cage` is a CLI wrapper that runs any command (AI coding agents, build tools, scripts, etc.) in OS-native sandboxes. It restricts filesystem reads/writes, controls network access, and isolates configuration — all without containers or VMs, preserving the host toolchain and filesystem layout.
+`cage` (**C**ontained **A**gent **G**uarded **E**nvironment) is a CLI wrapper that runs any command (AI coding agents, build tools, scripts, etc.) in OS-native sandboxes. It restricts filesystem reads/writes, controls network access, and isolates configuration — all without containers or VMs, preserving the host toolchain and filesystem layout.
 
 ```
 cage opencode
