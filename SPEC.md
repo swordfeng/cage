@@ -20,7 +20,7 @@ cage python script.py
 
 ### Goals
 
-- Restrict reads/writes based on configurable policies; operate on the same filesystem as the host (no mounts)
+- Restrict reads/writes based on configurable policies; operate on the same filesystem as the host (same paths, no containers)
 - Pass through only explicitly declared configs (SSH keys, gitconfig, environment variables)
 - Expose MCP sockets into the sandbox
 - Prevent writes outside allowed paths and reads of sensitive host paths
@@ -42,9 +42,9 @@ The target threat is a **process that is confused, buggy, or misconfigured** —
 
 | Threat | Linux | macOS | Windows |
 |---|---|---|---|
-| Writes outside allowed paths | ✅ Landlock | ✅ Seatbelt | ✅ ACLs (with caveats) |
-| Reads sensitive paths (e.g., `~/.ssh`) | ✅ Landlock | ✅ Seatbelt (see §5.2) | ✅ ACLs |
-| Exfiltrates data over network | ✅ seccomp | ✅ Seatbelt | ✅ WFP firewall rules |
+| Writes outside allowed paths | ✅ bubblewrap | ✅ Seatbelt | ✅ ACLs (with caveats) |
+| Reads sensitive paths (e.g., `~/.ssh`) | ✅ bubblewrap | ✅ Seatbelt (see §5.2) | ✅ ACLs |
+| Exfiltrates data over network | ✅ bubblewrap + seccomp | ✅ Seatbelt | ✅ WFP firewall rules |
 | Modifies shell config / crontab | ✅ | ✅ | ✅ |
 | Installs persistent malware | ✅ | ✅ | ⚠️ `%TEMP%` gap (see §5.3) |
 
@@ -55,6 +55,15 @@ The target threat is a **process that is confused, buggy, or misconfigured** —
 - Social engineering (process asking the user to run commands outside the sandbox)
 - MCP server compromise (out of scope)
 - macOS Seatbelt silent degradation on future OS versions
+
+**Known limitations and mitigations:**
+
+| Gap | Detail | Mitigation |
+|---|---|---|
+| Symlink/TOCTOU on macOS/Windows | Seatbelt and Windows ACLs may follow symlinks to paths outside the sandbox. | Bubblewrap on Linux uses mount namespaces (immune). macOS/Windows: accepted risk for the "confused process" threat model. |
+| Docker socket (`/var/run/docker.sock`) | A process with write access to the Docker socket can spawn containers with host mounts, escaping the sandbox. | Connecting to a Unix socket requires write permission on the socket file. Since `/var/run/docker.sock` is not in any writable root, this is blocked by default. |
+| Windows `%TEMP%` gap | Directories where `Everyone` has write access cannot be blocked by restricted token + ACLs. | Accepted limitation. WFP firewall blocks exfiltration. Temp dir cleaned on exit. See §5.3 and §13. |
+| Bubblewrap user namespace requirement | Some enterprise/container environments disable unprivileged user namespaces. | cage requires either unprivileged user namespaces or a setuid `bwrap` binary. Clear error message if unavailable. |
 
 ---
 
@@ -74,7 +83,7 @@ cage/
 │   │   └── merge.rs          # Policy composition logic
 │   └── platform/
 │       ├── mod.rs            # Platform detection, dispatch
-│       ├── linux.rs          # Landlock + seccomp launcher
+│       ├── linux.rs          # bubblewrap launcher + seccomp filter
 │       ├── macos.rs          # Seatbelt profile generator + sandbox-exec
 │       └── windows.rs        # Restricted Token + ACL + WFP firewall
 ├── config/
@@ -87,7 +96,7 @@ cage/
 ```
 $ cage opencode
 
-1.  Detect OS and kernel capabilities (Landlock ABI version, bwrap availability)
+1.  Detect OS and capabilities (bwrap availability, user namespace support)
 2.  Load and merge policy:
       ~/.config/cage/cage.toml          (user config)
       .cage.toml                        (project override, if present)
@@ -101,7 +110,7 @@ $ cage opencode
       - Copy/symlink declared passthrough configs (read-only)
       - Set up environment variables based on policy
 4.  Platform-specific sandbox setup:
-      Linux:   apply Landlock rules + seccomp BPF filter
+      Linux:   build bwrap command with bind mounts + seccomp filter
       macOS:   generate Seatbelt profile string → write to temp file
       Windows: create restricted token, set ACLs, install WFP rules
 5.  exec(agent) with:
@@ -110,7 +119,7 @@ $ cage opencode
       Environment    = filtered per policy (allowlist/blocklist mode + forced overrides)
       MCP socket     = passed through (Unix socket / named pipe)
 6.  On exit:
-      Linux/macOS: temp dir cleaned up, seccomp/Landlock auto-released on process exit
+      Linux/macOS: temp dir cleaned up, namespace/Seatbelt auto-released on process exit
       Windows:     WFP rules removed, ACLs restored, temp dir cleaned
       Exit code     = forwarded from the sandboxed process
 ```
@@ -239,7 +248,6 @@ policy = "build"
 # ── Platform-specific overrides ──────────────────────────────────────────────
 
 [platform.linux]
-default_backend = "landlock"    # "landlock" | "bwrap"
 fail_on_sandbox_error = true
 
 [platform.macos]
@@ -247,10 +255,11 @@ fail_on_sandbox_error = true    # set false to warn-and-continue if Seatbelt pro
 
 [platform.windows]
 cage_group = "CageUsers"
-stub_executables = ["ssh", "scp", "curl", "wget", "powershell"]
 ```
 
-### 4.2 Policy merge semantics
+### 4.2 Policy merge semantics (Phase 2)
+
+> **Note:** Policy composition is a Phase 2 feature. In Phase 1, only a single policy name is supported via `--policy <NAME>`.
 
 Multiple named policies can be composed with `+`:
 
@@ -350,53 +359,57 @@ impl Config {
 
 ## 5. Platform Implementations
 
-### 5.1 Linux: Landlock + seccomp-BPF (default)
+### 5.1 Linux: bubblewrap + seccomp
 
-**Requirements:** Linux kernel ≥ 5.13 for Landlock v1. Kernel ≥ 5.19 for v2 (truncate rules). Kernel ≥ 6.7 for TCP port restrictions.
+**Requirements:** `bwrap` binary installed (packaged as `bubblewrap` in most distros). Unprivileged user namespaces enabled (default on most desktop Linux) or setuid `bwrap` binary.
 
-**What it does:**
+**Why bubblewrap over Landlock:** Landlock is allow-only — a rule on a parent directory grants access to all children. This means `write_restricted_paths` (e.g., "allow `$CWD` but deny `$CWD/.git`") cannot be implemented without breaking new file creation in the writable root. Bubblewrap handles this natively via `--ro-bind` overlays within `--bind` mounts.
 
-1. Open Landlock ruleset with `LANDLOCK_CREATE_RULESET`
-2. Add rules:
-   - `READ_FILE + READ_DIR` on `/` (read-anywhere by default)
-   - `REFER + WRITE_FILE + MAKE_*` only on whitelisted writable roots
-3. `landlock_restrict_self()` — restrictions apply to this process and all children, cannot be removed
-   
-   **Note on `REFER`:** Hard links and cross-directory renames (e.g., `mv file /tmp/`) require the `REFER` right. We grant it only on writable roots (not globally on `/`) to prevent linking attacks. Add `/tmp` to `writable_roots` if you need cross-directory rename operations.
-4. Apply seccomp-BPF filter:
-   - Allow all syscalls except: `connect(AF_INET)`, `connect(AF_INET6)` → return `EACCES`
-   - Allow `connect(AF_UNIX)` (MCP sockets)
-5. `execvp(agent)`
+**How it works:** Build a `bwrap` command at runtime based on the resolved policy, then exec it via `std::process::Command`. No library API exists for bubblewrap — it is CLI-only.
 
-**Crate:** use the published [`landlock`](https://crates.io/crates/landlock) crate (canonical Rust binding). For seccomp, use [`seccompiler`](https://crates.io/crates/seccompiler) (AWS Firecracker's library, also published).
-
-Do **not** depend on Codex's internal `codex-core` or `linux-sandbox` crates — they are not published to crates.io, have no stable API, and couple you to OpenAI's internal `SandboxPolicy` type.
-
-**Degradation:** If kernel < 5.13, log a warning and optionally fall back to bubblewrap (`--backend bwrap`) or run unsandboxed with `--no-sandbox`.
-
-#### Alternative: bubblewrap (`--backend bwrap`)
-
-Bubblewrap uses user namespaces to fully hide paths (not just deny access). It also supports **bind-mount remapping** — presenting a path inside the sandbox at a different location than on the host. This is the only mechanism in the entire stack that supports path remapping.
+**Filesystem setup:**
 
 ```sh
 bwrap \
-  --unshare-all \
-  --share-net \                  # (omit to block network)
-  --bind $CWD /project \         # remap project to /project
-  --ro-bind /usr /usr \
-  --ro-bind /nix/store /nix/store \
-  --ro-bind $REAL_AGENT_CONFIG /home/user/.config/agent \   # remap config
-  --tmpfs /home/user \
-  --tmpfs /tmp \
+  --ro-bind / / \                           # read-only base (entire filesystem)
+  --dev /dev \                              # device nodes
+  --proc /proc \                            # /proc filesystem
+  --bind $CWD $CWD \                        # writable root (from policy)
+  --ro-bind $CWD/.git $CWD/.git \           # write_restricted_paths (read-only overlay)
+  --bind /tmp/cage-$PID /tmp/cage-$PID \    # session temp dir (writable)
   -- agent
 ```
 
-Use bubblewrap when:
-- You need to present a clean synthetic `HOME` at a completely different path
-- You need stronger isolation (entire path trees invisible, not just access-denied)
-- The project's security posture demands it
+- `--ro-bind / /` makes the entire filesystem read-only by default
+- `--bind $path $path` for each entry in `writable_roots` (grants read-write)
+- `--ro-bind $path $path` for each entry in `write_restricted_paths` — overlays a read-only mount on top of a writable parent, preventing writes to that subpath while keeping it readable
+- `--dev /dev` and `--proc /proc` for device nodes and process info
+- All paths remain at their original locations (no remapping by default)
 
-Bubblewrap requires either a setuid binary or unprivileged user namespaces (enabled in most desktop Linux distros, sometimes disabled in enterprise/container environments).
+**Network setup:**
+
+| Policy level | Bubblewrap flags | Seccomp | Effect |
+|---|---|---|---|
+| `none` | `--unshare-net` | None needed | Isolated network namespace with only its own loopback. No host network access. |
+| `localhost` | `--share-net` | `SECCOMP_RET_USER_NOTIF` on `connect()` | Host network shared, but seccomp supervisor inspects every `connect()` call via `/proc/pid/mem`, allowing only `127.0.0.1`/`::1`/`AF_UNIX` and blocking all other destinations. |
+| `full` | `--share-net` | None | Unrestricted host network access. |
+
+**Seccomp for `localhost` policy (Phase 1b):** Uses `SECCOMP_RET_USER_NOTIF` (Linux ≥ 5.0) to intercept `connect()` syscalls. The supervisor process reads the target's sockaddr from `/proc/pid/mem`, checks the address family and destination, and allows only loopback addresses and Unix domain sockets. This is passed to bwrap via the `--seccomp` flag with a pre-built BPF program. Note: seccomp cannot inspect sockaddr directly (it's behind a pointer) — the userspace supervisor is required for destination-level filtering.
+
+**MCP sockets:** Bind-mount Unix socket paths into the namespace:
+```sh
+--ro-bind /run/mcp/server.sock /run/mcp/server.sock
+```
+
+**Degradation:** If unprivileged user namespaces are disabled and `bwrap` is not setuid, exit with a clear error message suggesting the user either enable user namespaces or install a setuid `bwrap`.
+
+**Alternatives evaluated (not planned for implementation):**
+
+| Option | Verdict |
+|---|---|
+| Landlock (kernel ≥ 5.13) | Fast, no external deps, but cannot deny subpaths within allowed parents. Viable future fallback for systems without user namespaces if `write_restricted_paths` is not needed. |
+| Firejail | Separate tool with its own profile format and security model. Adds complexity without clear benefit over bubblewrap. |
+| Direct namespace syscalls | Same capability as bubblewrap but reimplemented in Rust (~2000 lines). Higher maintenance burden for no functional gain. |
 
 ### 5.2 macOS: Seatbelt (`sandbox-exec`)
 
@@ -437,6 +450,7 @@ Bubblewrap requires either a setuid binary or unprivileged user namespaces (enab
 - The profile **must be generated at runtime**. Static profiles don't work because writable paths include `$CWD` which is only known at invocation time.
 - Seatbelt rules on specific paths (especially `/private/var` and Homebrew paths) can break across macOS versions. Build a runtime check: if `sandbox-exec` exits with a sandbox-violation error before the agent produces output, log it clearly and optionally retry with a relaxed profile or `--no-sandbox`.
 - The `(allow default)` at the top means reads are allowed everywhere by default. Specific paths can be blocked with `(deny file-read*)` rules, which is how `read_restricted_paths` is implemented. This works well for blocking sensitive directories like `~/.ssh` while allowing general filesystem access.
+- **`write_restricted_paths`:** Implemented via `(deny file-write* (subpath "..."))` rules placed after the `(allow file-write* ...)` rules. In Seatbelt, later deny rules override earlier allows, so this works natively.
 
 **Alternatives evaluated and rejected:**
 
@@ -461,7 +475,8 @@ Based on the approach OpenAI open-sourced in `codex-rs/windows-sandbox-rs/` (mer
 **Layer 2 — NTFS ACLs**
 - Explicit ACEs grant write access to `$CWD` for the sandbox SID
 - Rest of the filesystem implicitly denies writes (restricted token cannot authenticate)
-- Caveat: directories where `Everyone` has write access (e.g., `%TEMP%`, some shared folders) cannot be blocked this way. Network-level blocking via WFP is the primary control for preventing data exfiltration.
+- Caveat: directories where `Everyone` has write access (e.g., `%TEMP%`, some shared folders) cannot be blocked by ACLs alone. This is an accepted limitation — WFP firewall rules remain the primary control for preventing data exfiltration via these paths.
+- **`write_restricted_paths`:** Implemented via explicit deny ACEs, which take precedence over allow ACEs in Windows security evaluation. This works natively.
 
 **Layer 3 — Windows Filtering Platform (WFP) Firewall Rules**
 - Outbound network blocked via WFP rules scoped to the sandbox user SID
@@ -480,7 +495,6 @@ cage-setup.exe
 CreateRestrictedToken(current_token, strip=[dangerous SIDs])
 Set ACLs: GRANT SandboxSID full-control on $CWD
 Add WFP rule: BLOCK outbound for SandboxSID
-Inject stub executables into $PATH
 CreateProcessWithToken(restricted_token, "agent.exe ...")
 [on exit]: Remove WFP rule, clean up ACLs
 ```
@@ -522,7 +536,7 @@ Each `cage` session creates a temporary directory (`/tmp/cage-$PID/`) for sessio
 └── ...                         # other session-specific files
 ```
 
-**Note:** `HOME` environment variable remains pointing to the user's actual home directory. The sandbox restricts access via OS-level permissions (Landlock/Seatbelt/ACLs), not by remapping paths. Use `XDG_CONFIG_HOME` or application-specific env vars if you need to redirect config locations.
+**Note:** `HOME` environment variable remains pointing to the user's actual home directory. The sandbox restricts access via OS-level mechanisms (bubblewrap/Seatbelt/ACLs), not by remapping paths. Use `XDG_CONFIG_HOME` or application-specific env vars if you need to redirect config locations.
 
 ### 6.2 Environment variable handling
 
@@ -558,12 +572,11 @@ set = { CAGE = "1" }
 
 MCP servers communicate over Unix domain sockets (Linux/macOS) or named pipes (Windows). These must be accessible from inside the sandbox.
 
-**Linux (Landlock):** Unix sockets are not subject to Landlock filesystem rules. The seccomp filter explicitly allows `AF_UNIX`. No special configuration needed.
-
-**Linux (bubblewrap):** Bind-mount the socket path:
+**Linux (bubblewrap):** Bind-mount the socket path into the namespace:
 ```sh
---bind /run/mcp/server.sock /run/mcp/server.sock
+--ro-bind /run/mcp/server.sock /run/mcp/server.sock
 ```
+The seccomp filter (when used for `localhost` network policy) explicitly allows `AF_UNIX` connections.
 
 **macOS (Seatbelt):** The profile includes `(allow network-outbound (remote unix-socket))`. The socket path must also be readable (allowed by `(allow default)`).
 
@@ -573,19 +586,18 @@ MCP servers communicate over Unix domain sockets (Linux/macOS) or named pipes (W
 
 ## 8. Path Handling
 
-`cage` operates on the host filesystem directly using OS-native permission mechanisms (Landlock, Seatbelt, Windows ACLs). There is no path remapping or bind mounting — all paths accessible inside the cage are at the same location as on the host.
+`cage` operates on the host filesystem directly using OS-native mechanisms (bubblewrap bind mounts, Seatbelt, Windows ACLs). All paths accessible inside the cage are at the same location as on the host (no remapping by default).
 
 | Mechanism | Same filesystem? | Path remapping? |
 |---|---|---|
-| Landlock + seccomp | ✅ Yes | ❌ No |
-| bubblewrap | ✅ Yes | ✅ Yes (optional) |
+| bubblewrap (Linux) | ✅ Yes | ✅ Yes (optional, not used by default) |
 | Seatbelt (macOS) | ✅ Yes | ❌ No |
 | Windows restricted token + ACLs | ✅ Yes | ❌ No |
 
 This design preserves the full host toolchain and ensures that:
 - Absolute paths work identically inside and outside the cage
-- No filesystem namespace setup is required (fast startup)
 - Native platform toolchains (Xcode, MSVC, etc.) work without modification
+- Sub-second startup overhead (bubblewrap namespace setup is lightweight)
 
 ---
 
@@ -600,10 +612,9 @@ ARGS:
     [ARGS]...        Arguments to pass to the command
 
 OPTIONS:
-    -p, --policy <NAME[+NAME...]>   Named policy or merged set (default: "default")
-        --allow-network             Shorthand for --policy <current>+full-network
+    -p, --policy <NAME>             Named policy (default: "default"). Phase 2: supports NAME+NAME composition.
+        --allow-network             Shorthand: use current policy but override network to "full"
         --no-sandbox                Run command unsandboxed (logs a warning)
-        --backend <BACKEND>         Linux only: landlock (default) | bwrap
         --passthrough <PATH>        Add an extra read-only passthrough path (repeatable)
         --writable <PATH>           Add an extra writable root (repeatable)
         --write-restrict <PATH>     Add an extra write-restricted path (repeatable)
@@ -617,8 +628,7 @@ EXAMPLES:
     cage opencode                       # Uses 'build' policy (from command_policy mapping)
     cage --allow-network claude         # Uses 'build' policy + adds network access
     cage --policy strict codex          # Overrides default, uses 'strict' policy
-    cage --policy build+deploy ./build.sh
-    cage --backend bwrap python script.py
+    cage --policy deploy ./build.sh
     cage --no-sandbox npm test
 ```
 
@@ -629,10 +639,12 @@ EXAMPLES:
 **Use case:** Allow agents to request execution of commands outside the sandbox for global operations (system package installs, global tool configuration, accessing credentials outside the project directory).
 
 **Two MCP tools:**
-- `escape_bash` - Execute command outside sandbox; approval via pattern matching + agentic review (deferred design)
-- `escape_bash_ask` - Always prompts user for approval; excluded from agent's default auto-approve rules
+- `escape_bash` - Execute command outside sandbox; approval via user-defined pattern matching, smart safety check, or explicit user prompt
+- `escape_bash_ask` - Always prompts user for approval (no auto-approve, regardless of pattern matching rules)
 
-**Security:** All escape calls are logged. Each call is limited to a single command execution. No scope restrictions (full host access when approved).
+**Design intent:** Agents should prefer regular sandboxed execution. Escape is a last resort for operations that genuinely cannot work inside the sandbox (e.g., system package installs, global tool configuration). Agents should not routinely use escape for convenience.
+
+**Security:** All escape calls are logged regardless of approval method. Each call is limited to a single command execution. Full host access when approved.
 
 ---
 
@@ -644,13 +656,14 @@ EXAMPLES:
 
 - [ ] Policy config loading and merging
 - [ ] Environment setup and temp dir isolation (§6)
-- [ ] Linux: Landlock + seccomp using published `landlock` + `seccompiler` crates
+- [ ] Linux: bubblewrap launcher with bind mounts (network: `none` and `full` only)
 - [ ] macOS: Seatbelt profile generator + `sandbox-exec` exec
 - [ ] CLI interface and default policy
 - [ ] Variable expansion ($CWD, $VAR)
 
-### Phase 1b — Windows Support (Weeks 4-5)
+### Phase 1b — Windows + Localhost Network (Weeks 4-5)
 
+- [ ] Linux: seccomp `SECCOMP_RET_USER_NOTIF` supervisor for `localhost` network policy
 - [ ] Windows: Restricted Token implementation
 - [ ] Windows: ACL management layer
 - [ ] Windows: WFP firewall integration
@@ -668,8 +681,7 @@ EXAMPLES:
 
 ### Phase 3 — Advanced (Future)
 
-- [ ] Linux: bubblewrap backend (`--backend bwrap`) — stronger isolation with bind-mount remapping
-- [ ] Linux kernel ≥ 6.7: Landlock TCP port restrictions for surgical network policy
+- [ ] Linux: Landlock backend as lightweight alternative for systems without user namespaces (accepting no `write_restricted_paths` support)
 - [ ] Network allowlist proxy mode (`network = "proxy"`) — route outbound through a domain-filtering HTTP proxy, similar to Claude Code's approach
 - [ ] macOS Containerization (macOS 26+): Linux container mode for agents that only need Linux toolchain (Node/Python/Go/Rust); not suitable for Xcode/iOS work
 - [ ] VM mode (`--isolation=vm`): Firecracker microVM for highest assurance; ~1–2s startup; suitable for CI
@@ -683,8 +695,9 @@ EXAMPLES:
 
 ```toml
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock    = "0.4"      # canonical Rust Landlock binding — crates.io
-seccompiler = "0.4"      # AWS Firecracker seccomp-BPF — crates.io
+seccompiler = "0.4"      # Phase 1b: seccomp-BPF for SECCOMP_RET_USER_NOTIF on connect() (localhost network policy)
+# bwrap (bubblewrap) is a runtime dependency, not a Rust crate — invoked via std::process::Command
+# Phase 1a has no Linux-specific Rust crate dependencies
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
@@ -696,13 +709,15 @@ windows = { version = "0.58", features = [
 
 macOS requires no crate — Seatbelt is just `std::process::Command::new("sandbox-exec")`.
 
+Linux requires `bwrap` installed on the system — invoked via `std::process::Command::new("bwrap")`.
+
 ### Windows implementation
 
 Implement our own Windows sandbox module using the `windows` and `windows-sys` crates. Reference the approach in `codex-rs/windows-sandbox-rs/` for the three-layer mechanism (restricted token, ACLs, WFP), but write our own code rather than vendoring (the Codex crate depends on internal workspace crates not available on crates.io).
 
 ### Why not use Codex crates directly
 
-- `codex-linux-sandbox`: binary-only crate, no `[lib]` target, not published
+- `codex-linux-sandbox`: binary-only crate, no `[lib]` target, not published. Also uses Landlock which cannot implement `write_restricted_paths`.
 - `codex-core` (contains Landlock + Seatbelt code): not published to crates.io, internal API, couples you to OpenAI's `SandboxPolicy` type
 - `codex-windows-sandbox`: has a `pub fn run_windows_sandbox_capture` but is not published; git dependency is fragile as OpenAI refactors internals
 
@@ -723,7 +738,7 @@ Environment variables set via `.env` files or other mechanisms in the working di
 
 ### Windows `%TEMP%` gap
 
-Directories where `Everyone` has write access (notably `%TEMP%` and some shared folders) cannot be blocked by the restricted token + ACL approach because the write permission is granted independently of SID. Mitigation: inject stub executables for tools that could exfiltrate via temp files. This is a known limitation of the Windows approach (shared with Codex's implementation).
+Directories where `Everyone` has write access (notably `%TEMP%` and some shared folders) cannot be blocked by the restricted token + ACL approach because the write permission is granted independently of SID. This is an accepted limitation of the Windows approach (shared with Codex's implementation). The WFP firewall rules remain the primary control for preventing data exfiltration. For persistence risk (malicious files surviving the sandbox session), the temp directory is cleaned up on exit as best-effort.
 
 ### Credential passthrough hygiene
 
@@ -737,14 +752,13 @@ Directories where `Everyone` has write access (notably `%TEMP%` and some shared 
 
 ## 14. References
 
-- Codex Linux sandbox: `openai/codex` → `codex-rs/linux-sandbox/` and `codex-rs/core/src/landlock.rs`
+- bubblewrap: https://github.com/containers/bubblewrap
+- `seccompiler` crate: https://crates.io/crates/seccompiler
+- Codex Linux sandbox (Landlock-based, for reference): `openai/codex` → `codex-rs/linux-sandbox/` and `codex-rs/core/src/landlock.rs`
 - Codex macOS Seatbelt: `openai/codex` → `codex-rs/core/src/seatbelt.rs`
 - Codex Windows sandbox: `openai/codex` → `codex-rs/windows-sandbox-rs/src/lib.rs` (PR #4905, merged Mar 2026)
-- Landlock kernel docs: https://docs.kernel.org/userspace-api/landlock.html
-- `landlock` crate: https://crates.io/crates/landlock
-- `seccompiler` crate: https://crates.io/crates/seccompiler
+- Landlock kernel docs (alternative backend, Phase 3): https://docs.kernel.org/userspace-api/landlock.html
 - Apple Containerization (macOS 26, Linux containers only): https://github.com/apple/container
-- bubblewrap: https://github.com/containers/bubblewrap
 - Claude Code `CLAUDE_CONFIG_DIR` behavior: https://github.com/anthropics/claude-code/issues/3833
 - opencode `OPENCODE_CONFIG` limitation (agents not loading): https://github.com/sst/opencode/issues/3432
 - opencode XDG support: https://github.com/sst/opencode/issues/6669
