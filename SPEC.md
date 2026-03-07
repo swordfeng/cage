@@ -133,10 +133,10 @@ $ cage opencode
 
 ### 4.1 Policy config format
 
+#### Named policies
+
 ```toml
 # ~/.config/cage/cage.toml
-
-# ── Named policies ──────────────────────────────────────────────────────────
 
 [policies.default]
 writable_roots = ["$CWD", "$TMPDIR", "~/.cache"]
@@ -167,6 +167,7 @@ set = { CAGE = "1" }                  # always set these
 # mode = "allowlist"
 # allow = ["PATH", "NODE_ENV"]
 # set = { CAGE = "1" }
+```
 
 #### Variable expansion
 
@@ -190,20 +191,22 @@ writable_roots = ["$CWD", "~\\.cache", "$TEMP", "$LOCALAPPDATA"]
 
 Variables are resolved at policy application time. If an environment variable is not set, the path item is removed from the list (not an error).
 
-# ── Command to policy mappings ───────────────────────────────────────────────
-# Map specific commands to default policies. The first matching pattern is used.
-# Patterns are checked in order. If no match, the "default" policy is used.
-#
-# Pattern matching rules:
-# - Matches against the basename (filename only, no directory)
-# - Extension is stripped (.exe, .cmd, .bat on Windows; no extension elsewhere)
-# - Supports glob wildcards: * matches any sequence, ? matches single char
-#
-# Examples:
-#   pattern = "opencode"    matches: opencode, opencode.exe, /usr/bin/opencode, C:\tools\opencode.exe
-#   pattern = "python*"     matches: python, python3, python.exe, python3.11.exe
-#   pattern = "node"        matches: node, node.exe
+#### Command to policy mappings
 
+Map specific commands to default policies. The first matching pattern is used. Patterns are checked in order. If no match, the "default" policy is used.
+
+**Pattern matching rules:**
+- Matches against the basename (filename only, no directory)
+- Extension is stripped (.exe, .cmd, .bat on Windows; no extension elsewhere)
+- Supports glob wildcards: `*` matches any sequence, `?` matches single char
+
+**Examples:**
+- `pattern = "opencode"` matches: `opencode`, `opencode.exe`, `/usr/bin/opencode`, `C:\tools\opencode.exe`
+- `pattern = "python*"` matches: `python`, `python3`, `python.exe`, `python3.11.exe`
+- `pattern = "node"` matches: `node`, `node.exe`
+
+```toml
+# Command to policy mappings in cage.toml
 [[command_policy]]
 pattern = "opencode"
 policy = "default"
@@ -219,9 +222,10 @@ policy = "default"
 [[command_policy]]
 pattern = "aider"
 policy = "strict"
+```
 
-# ── Platform-specific overrides ──────────────────────────────────────────────
-
+#### Platform-specific overrides
+```toml
 [platform.linux]
 fail_on_sandbox_error = true
 
