@@ -40,21 +40,20 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Pass temp dir path to platform backend
 
 ### T1.7 — Linux: bubblewrap launcher (`src/platform/linux.rs`)
-- [ ] Build `bwrap` argv from resolved `SandboxPolicy`:
+- [x] Build `bwrap` argv from resolved `SandboxPolicy`:
   - `--ro-bind / /` first
   - `--dev /dev`, `--proc /proc`
   - `--bind $path $path` per `writable_roots` (in order)
   - `--ro-bind $path $path` per `write_restricted_paths` (after writable roots — overlay wins)
-  - `--bind $socket $socket` per MCP socket paths
   - `--bind <session_tmpdir> <session_tmpdir>`
   - `--unshare-pid`, `--die-with-parent` (always; see SPEC §5.1)
   - Network: `--unshare-net` for `None`; nothing for `Full`; `--share-net` for `Localhost` (seccomp handles filtering, phase 1b)
   - `-- <COMMAND> [ARGS]`
-- [ ] Canonicalize all paths via `std::fs::canonicalize()` before building argv (resolves symlinks)
-- [ ] Check `bwrap` availability on startup: `Command::new("bwrap").arg("--version")`; clear error if missing with install hint
-- [ ] Check unprivileged user namespaces: read `/proc/sys/kernel/unprivileged_userns_clone`; error if `0` and bwrap is not setuid
-- [ ] Apply `EnvPolicy::filter()` to environment before exec; pass filtered env via `Command::env_clear().envs(...)`
-- [ ] `--no-sandbox`: log warning, exec command directly without bwrap
+- [x] Canonicalize all paths via `std::fs::canonicalize()` before building argv (resolves symlinks)
+- [x] Check `bwrap` availability on startup: `Command::new("bwrap").arg("--version")`; clear error if missing with install hint
+- [x] Check unprivileged user namespaces: read `/proc/sys/kernel/unprivileged_userns_clone`; error if `0` and bwrap is not setuid
+- [x] Apply `EnvPolicy::filter()` to environment before exec; pass filtered env via `Command::env_clear().envs(...)`
+- [x] `--no-sandbox`: log warning, exec command directly without bwrap (handled in main.rs)
 
 ### T1.8 — macOS: Seatbelt launcher (`src/platform/macos.rs`)
 - [ ] `fn sbpl_escape_path(path: &str) -> String` — replace `\` → `\\`, `"` → `\"` (see SPEC §5.2)
@@ -70,12 +69,6 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] Exec: `Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&profile_path).arg("--").arg(command).args(args)` (hardcoded path, not PATH lookup — see SPEC §5.2)
 - [ ] `fail_on_sandbox_error = false`: if `sandbox-exec` fails to exec, log warning and exec command directly
 - [ ] Apply `EnvPolicy::filter()` to environment before exec
-
-### T1.9 — MCP socket passthrough (Linux/macOS)
-- [ ] Read `MCP_SOCKET` environment variable (and agent-specific variants) per SPEC §7
-- [ ] Linux: add each socket path as `--bind <path> <path>` to bwrap argv
-- [ ] macOS: `(allow network-outbound (remote unix-socket))` already present in `localhost`/`full` network profile; also ensure socket's directory is readable (covered by `(allow default)`)
-- [ ] If `MCP_SOCKET` is unset, skip passthrough silently
 
 ### T1.10 — `--dry-run` and `-v` output
 - [x] `-v`: print resolved `SandboxPolicy` (formatted), temp dir path, and chosen platform backend before exec
@@ -198,6 +191,13 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] Entry schema: `{ "ts": "<ISO8601>", "op": "file-write|file-read|connect", "path": "...", "decision": "deny", "rule": "write_restricted_paths[0]" }`
 - [ ] Linux: log connect() denials from seccomp supervisor
 - [ ] macOS/Windows: log at policy generation time what restrictions are active (static summary, since kernel-level per-access hooks aren't available without audit frameworks)
+
+### T3.4 — MCP socket passthrough (moved from Phase 1)
+- [ ] Read `MCP_SOCKET` environment variable (and agent-specific variants) per SPEC §7
+- [ ] Linux: add each socket path as `--bind <path> <path>` to bwrap argv
+- [ ] macOS: `(allow network-outbound (remote unix-socket))` already present in `localhost`/`full` network profile; also ensure socket's directory is readable (covered by `(allow default)`)
+- [ ] Windows: named pipe access via restricted token
+- [ ] If `MCP_SOCKET` is unset, skip passthrough silently
 
 ---
 

@@ -31,7 +31,7 @@ feat: add T1.X - brief description
 - T1.6 Session temp dir
 - T1.7 Linux: bubblewrap launcher
 - T1.8 macOS: Seatbelt launcher
-- T1.9 MCP socket passthrough
+- T1.9 ✗ MCP socket passthrough (deferred to Phase 2)
 - T1.10 --dry-run and -v output
 - T1.11 Integration tests
 

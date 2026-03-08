@@ -22,7 +22,7 @@ cage python script.py
 
 - Restrict reads/writes based on configurable policies; operate on the same filesystem as the host (same paths, no containers)
 - Pass through only explicitly declared configs (SSH keys, gitconfig, environment variables)
-- Expose MCP sockets into the sandbox
+- Expose MCP sockets into the sandbox (Phase 2)
 - Prevent writes outside allowed paths and reads of sensitive host paths
 - Preserve the full host toolchain (compiler, SDK, language runtimes)
 - Work on Linux, macOS, and Windows
@@ -120,7 +120,7 @@ $ cage opencode
       CWD            = current working directory (read-write, if in policy)
       HOME           = user home directory (same as host)
       Environment    = filtered per policy (allowlist/blocklist mode + forced overrides)
-      MCP socket     = passed through (Unix socket / named pipe)
+      MCP socket     = passed through (Unix socket / named pipe) — Phase 2
 6.  On exit:
       Linux/macOS: temp dir cleaned up, namespace/Seatbelt auto-released on process exit
       Windows:     WFP rules removed, ACLs restored, temp dir cleaned
@@ -368,7 +368,7 @@ bwrap \
 - `--dev /dev` and `--proc /proc` for device nodes and process info
 - All paths remain at their original locations (no remapping by default)
 
-**Mount ordering:** Bwrap applies mounts in CLI argument order; later mounts overlay earlier ones. The required order is: `--ro-bind / /` first, then `--bind` for each `writable_root`, then `--ro-bind` for each `write_restricted_path` (so the read-only overlay wins over the writable parent for that subtree), then `--bind` for MCP sockets and the session temp dir. Getting this order wrong silently produces incorrect access control.
+**Mount ordering:** Bwrap applies mounts in CLI argument order; later mounts overlay earlier ones. The required order is: `--ro-bind / /` first, then `--bind` for each `writable_root`, then `--ro-bind` for each `write_restricted_path` (so the read-only overlay wins over the writable parent for that subtree), then `--bind` for the session temp dir. Getting this order wrong silently produces incorrect access control. (Note: MCP socket passthrough is Phase 2.)
 
 **Essential flags:** `--unshare-pid` creates a new PID namespace so the agent's `/proc` view is isolated (required — do not rely on bwrap defaults). `--die-with-parent` ensures the agent is killed if cage exits for any reason including SIGKILL, preventing orphaned unsandboxed processes. Do **not** use `--new-session`; it detaches the controlling terminal and breaks interactive agents.
 
@@ -394,7 +394,7 @@ bwrap \
 
 Requires Linux ≥ 5.0 for `SECCOMP_RET_USER_NOTIF`. Detect and emit a clear error if the running kernel is older.
 
-**MCP sockets:** Bind-mount Unix socket paths into the namespace:
+**MCP sockets (Phase 2):** Bind-mount Unix socket paths into the namespace:
 ```sh
 --bind /run/mcp/server.sock /run/mcp/server.sock
 ```
@@ -439,8 +439,8 @@ Note: Unix domain sockets require write permission to connect. Use `--bind` (rea
 ; ── Network restrictions ────────────────────────────────────────────────────
 (deny network-outbound)
 (allow network-outbound
-  (remote unix-socket)                   ; MCP sockets
-  (remote ip "localhost:*"))             ; localhost only (MCP HTTP, git over local proxy)
+  (remote unix-socket)                   ; MCP sockets (Phase 2)
+  (remote ip "localhost:*"))             ; localhost only
 
 ; ── For --allow-network mode, replace above with: ──────────────────────────
 ; (allow network*)
@@ -666,7 +666,9 @@ set = { CAGE = "1" }
 
 ---
 
-## 7. MCP Socket Passthrough
+## 7. MCP Socket Passthrough (Phase 2)
+
+> **Note:** MCP socket passthrough is deferred to Phase 2.
 
 MCP servers communicate over Unix domain sockets (Linux/macOS) or named pipes (Windows). These must be accessible from inside the sandbox.
 
@@ -676,7 +678,7 @@ MCP servers communicate over Unix domain sockets (Linux/macOS) or named pipes (W
 ```
 The seccomp filter (when used for `localhost` network policy) explicitly allows `AF_UNIX` connections.
 
-**Phase 1 MCP socket path:** Read from the `MCP_SOCKET` environment variable (or the agent-specific variable used by the tool being wrapped, e.g., `OPENCODE_MCP_SOCKET`). If unset, no socket passthrough is configured and the agent communicates without MCP. Proper discovery (querying a running MCP daemon or reading agent config) is deferred to Phase 3.
+**MCP socket path:** Read from the `MCP_SOCKET` environment variable (or the agent-specific variable used by the tool being wrapped, e.g., `OPENCODE_MCP_SOCKET`). If unset, no socket passthrough is configured and the agent communicates without MCP. Proper discovery (querying a running MCP daemon or reading agent config) is deferred to Phase 3.
 
 **macOS (Seatbelt):** The profile includes `(allow network-outbound (remote unix-socket))`. The socket path must also be readable (allowed by `(allow default)`).
 
@@ -758,15 +760,13 @@ EXAMPLES:
 
 ### Phase 1a — Core Platforms (Weeks 1-3)
 
-- [ ] Policy config loading and merging
-- [ ] Command-to-policy mappings (`command_policy` config)
-- [ ] Environment setup and temp dir isolation (§6)
-- [ ] Linux: bubblewrap launcher with bind mounts (network: `none` and `full` only)
-- [ ] Linux: MCP socket passthrough
+- [x] Policy config loading and merging
+- [x] Command-to-policy mappings (`command_policy` config)
+- [x] Environment setup and temp dir isolation (§6)
+- [x] Linux: bubblewrap launcher with bind mounts (network: `none` and `full` only)
 - [ ] macOS: Seatbelt profile generator + `sandbox-exec` exec
-- [ ] macOS: MCP socket passthrough
-- [ ] CLI interface and default policy
-- [ ] Variable expansion ($CWD, $VAR)
+- [x] CLI interface and default policy
+- [x] Variable expansion ($CWD, $VAR)
 - [ ] Integration tests: verify write_restricted_paths denies writes
 - [ ] Integration tests: verify network policies block/allow correctly
 - [ ] Integration tests: verify read_restricted_paths denies reads
@@ -779,7 +779,6 @@ EXAMPLES:
 - [ ] Windows: WFP firewall integration
 - [ ] Windows: `cage-setup.exe` installer (one-time, requires admin)
 - [ ] Windows: Testing and validation
-- [ ] Windows: MCP socket passthrough
 - [ ] Cleanup on exit (temp dirs)
 - [ ] Integration tests for Windows sandbox
 
@@ -788,6 +787,7 @@ EXAMPLES:
 - [ ] Policy composition (`--policy a+b`)
 - [ ] Config validation (detect conflicting settings)
 - [ ] Structured audit log of denied accesses
+- [ ] MCP socket passthrough (Linux, macOS, Windows)
 
 ### Phase 3 — Advanced (Future)
 
