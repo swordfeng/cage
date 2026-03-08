@@ -357,6 +357,8 @@ bwrap \
   --bind $CWD $CWD \                        # writable root (from policy)
   --ro-bind $CWD/.git $CWD/.git \           # write_restricted_paths (read-only overlay)
   --bind /tmp/cage-$PID /tmp/cage-$PID \    # session temp dir (writable)
+  --unshare-pid \                           # new PID namespace (agent sees only its own /proc)
+  --die-with-parent \                       # agent is killed if cage exits for any reason
   -- agent
 ```
 
@@ -365,6 +367,10 @@ bwrap \
 - `--ro-bind $path $path` for each entry in `write_restricted_paths` — overlays a read-only mount on top of a writable parent, preventing writes to that subpath while keeping it readable
 - `--dev /dev` and `--proc /proc` for device nodes and process info
 - All paths remain at their original locations (no remapping by default)
+
+**Mount ordering:** Bwrap applies mounts in CLI argument order; later mounts overlay earlier ones. The required order is: `--ro-bind / /` first, then `--bind` for each `writable_root`, then `--ro-bind` for each `write_restricted_path` (so the read-only overlay wins over the writable parent for that subtree), then `--bind` for MCP sockets and the session temp dir. Getting this order wrong silently produces incorrect access control.
+
+**Essential flags:** `--unshare-pid` creates a new PID namespace so the agent's `/proc` view is isolated (required — do not rely on bwrap defaults). `--die-with-parent` ensures the agent is killed if cage exits for any reason including SIGKILL, preventing orphaned unsandboxed processes. Do **not** use `--new-session`; it detaches the controlling terminal and breaks interactive agents.
 
 **PID namespace:** Bubblewrap creates a new PID namespace by default (via `--unshare-pid` implicit). The sandboxed process sees only its own process tree in `/proc`, not host PIDs. This prevents `/proc` introspection of host processes.
 
@@ -376,7 +382,17 @@ bwrap \
 | `localhost` | `--share-net` | `SECCOMP_RET_USER_NOTIF` on `connect()` | Host network shared, but seccomp supervisor inspects every `connect()` call via `/proc/pid/mem`, allowing only `127.0.0.1`/`::1`/`AF_UNIX` and blocking all other destinations. |
 | `full` | `--share-net` | None | Unrestricted host network access. |
 
-**Seccomp for `localhost` policy (Phase 1b):** Uses `SECCOMP_RET_USER_NOTIF` (Linux ≥ 5.0) to intercept `connect()` syscalls. The supervisor process reads the target's sockaddr from `/proc/pid/mem`, checks the address family and destination, and allows only loopback addresses and Unix domain sockets. This is passed to bwrap via the `--seccomp` flag with a pre-built BPF program. Note: seccomp cannot inspect sockaddr directly (it's behind a pointer) — the userspace supervisor is required for destination-level filtering.
+**Seccomp for `localhost` policy (Phase 1b):** Uses `SECCOMP_RET_USER_NOTIF` (Linux ≥ 5.0) to intercept `connect()` syscalls. The supervisor inspects each `connect()` call's target address via `/proc/pid/mem` and allows only loopback and Unix domain socket destinations. Note: seccomp BPF cannot inspect sockaddr directly (it's behind a pointer) — the userspace supervisor is required for destination-level filtering.
+
+**Seccomp supervisor architecture:** The notification FD cannot be obtained inside bwrap's child process and handed back to cage after exec. The correct flow:
+
+1. cage creates a `socketpair(AF_UNIX, SOCK_SEQPACKET)` before forking.
+2. cage forks a child. The child builds and installs the seccomp BPF filter using `seccomp(SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_NEW_LISTENER, bpf)`, which returns a notification FD in the child.
+3. The child sends the notification FD to cage via `SCM_RIGHTS` over the socketpair.
+4. The child then `exec(bwrap ...)`. The notification FD survives `exec()` and remains active for the bwrap subtree.
+5. cage's supervisor thread receives the notification FD and services it: for each `connect()` notification, read `struct seccomp_notif` (contains tracee PID and syscall args), read the `sockaddr` from `/proc/<tracee_pid>/mem` at the pointer address, check `sa_family` and destination. Allow `AF_UNIX`, `AF_INET`/`AF_INET6` to `127.0.0.1`/`::1`; deny all else with `ECONNREFUSED` via `struct seccomp_notif_resp`.
+
+Requires Linux ≥ 5.0 for `SECCOMP_RET_USER_NOTIF`. Detect and emit a clear error if the running kernel is older.
 
 **MCP sockets:** Bind-mount Unix socket paths into the namespace:
 ```sh
@@ -432,7 +448,8 @@ Note: Unix domain sockets require write permission to connect. Use `--bind` (rea
 
 **Key constraints:**
 - The profile **must be generated at runtime**. Static profiles don't work because writable paths include `$CWD` which is only known at invocation time.
-- **TODO:** Properly escape `$CWD` and other paths when substituting into SBPL profile. Research SBPL escaping rules during implementation (special characters like `)`, `"`, `\` could inject rules).
+- **Path escaping in SBPL:** SBPL string literals use C-style escaping — replace `\` with `\\` and `"` with `\"` before embedding any path. The `)` character is safe inside a quoted string literal. Apply this to every path embedded in the profile (CWD, writable roots, restricted paths, temp dir).
+- **Symlink canonicalization:** Always call `std::fs::canonicalize()` on all paths before embedding them in the profile. macOS resolves `/tmp` to `/private/tmp`; an unresolved `/tmp/cage-$PID` path in the profile will be silently denied by Seatbelt, causing the sandbox to misbehave without any error.
 - The `(allow default)` at the top means reads are allowed everywhere by default. Specific paths can be blocked with `(deny file-read*)` rules, which is how `read_restricted_paths` is implemented. This works well for blocking sensitive directories like `~/.ssh` while allowing general filesystem access.
 - **`write_restricted_paths`:** Implemented via `(deny file-write* (subpath "..."))` rules placed after the `(allow file-write* ...)` rules. In Seatbelt, later deny rules override earlier allows, so this works natively.
 
@@ -445,63 +462,154 @@ Note: Unix domain sockets require write permission to connect. Use `--bind` (rea
 | Virtualization.framework (Tart, Lume) | Full macOS VM, 5–30s startup, high RAM. Breaks host toolchain. |
 | Alcoholless (separate macOS user) | User-level isolation only, weaker guarantees, complex setup. |
 
-### 5.3 Windows: Restricted Token + ACLs + WFP Firewall
+### 5.3 Windows: Hybrid Restricted Token + User Account Switching + WFP
 
-Based on the approach OpenAI open-sourced in `codex-rs/windows-sandbox-rs/` (merged March 2026, PR #4905). This is the first production-validated, open-source Windows agent sandbox.
+Uses two complementary mechanisms: **restricted tokens** (`SidsToRestrict`) for filesystem write scoping, and **user account switching** (`LogonUser`) for WFP network policy enforcement. Informed by Codex's `windows-sandbox-rs` (OpenAI, merged March 2026) but improves on it with restricting SIDs for finer-grained filesystem isolation and cached workspace groups to amortize ACL cost.
 
 **Three-layer mechanism:**
 
-**Layer 1 — Restricted Token**
-- `CreateRestrictedToken()` strips dangerous SIDs and privileges from the current token
-- The agent process runs with a reduced identity
-- Cannot access resources requiring the user's standard SID
+**Layer 1 — Restricted Token (filesystem write scoping)**
+- `CreateRestrictedToken()` adds workspace-specific groups to `SidsToRestrict`
+- Windows performs a **dual access check**: (1) normal SIDs must grant access, AND (2) at least one restricting SID must also have a matching ACE
+- Final access = intersection of both checks — the restricting SIDs narrow what the process can write to
+- Restricting SIDs can be arbitrary SIDs (need not be groups the user belongs to) — the well-known `RESTRICTED` SID (S-1-5-12) must always be included
 
-**Layer 2 — NTFS ACLs**
-- Explicit ACEs grant write access to `$CWD` for the sandbox SID
-- Rest of the filesystem implicitly denies writes (restricted token cannot authenticate)
-- Caveat: directories where `Everyone` has write access (e.g., `%TEMP%`, some shared folders) cannot be blocked by ACLs alone. This is an accepted limitation — WFP firewall rules remain the primary control for preventing data exfiltration via these paths.
-- **`write_restricted_paths`:** Implemented via explicit deny ACEs, which take precedence over allow ACEs in Windows security evaluation. This works natively.
+**Layer 2 — NTFS ACLs (workspace + policy groups)**
+- Per-workspace dynamic groups (e.g., `<user>-CageWS-<hash>`) with inheritable write ACEs on `$CWD`
+- `SetNamedSecurityInfoW` with inheritable ACEs automatically propagates to all existing children (synchronous, O(n) first time, cached thereafter)
+- `<user>-CageUsers` group gets read ACE on user profile (sandbox accounts have no inherent access to user files)
+- **`write_restricted_paths`:** Deny ACEs for `<user>-CageUsers` group on restricted paths (`.git/`, etc.). Deny ACEs take precedence over allow ACEs.
 
-**Layer 3 — Windows Filtering Platform (WFP) Firewall Rules**
-- Outbound network blocked via WFP rules scoped to the sandbox user SID
-- Localhost still reachable (MCP sockets, local git proxy)
+**Layer 3 — WFP Firewall Rules (user account identity)**
+- WFP's `FWPM_CONDITION_ALE_USER_ID` uses `AccessCheck()` on the token's **normal** SID list — restricting SIDs are invisible to WFP
+- Network policy is enforced by running the process as a dedicated user account whose SID matches static WFP rules
+- `full` policy uses the current user's own token (no account switch, no WFP rule)
+
+**Account and group structure:**
+
+`cage-setup.exe` creates (per installing user):
+
+| Entity | Type | Purpose |
+|---|---|---|
+| `<user>-CageOffline` | User account | `none` network policy identity |
+| `<user>-CageLocalhostOnly` | User account | `localhost` network policy identity |
+| `<user>-CageUsers` | Group (static) | Contains both accounts. Read ACE on profile, deny ACEs on restricted paths |
+| `<user>-CageWS-<hash>` | Group (dynamic, per workspace) | Write ACE on workspace. Sandbox accounts added as members. Used as restricting SID |
+| `<user>-CagePolicy-<hash>` | Group (dynamic, per policy) | Write ACE on global writable paths (`%TEMP%`, etc.). Sandbox accounts added as members. Used as restricting SID |
+
+Sandbox accounts are added as **members** of each workspace/policy group. This way, one ACE per path serves both the normal check (via group membership in the token's normal SID list) and the restricting check (via the same SID in the restricting list). For `full` policy, no account switch is needed — the process runs as the current user (who owns the files, so the normal check passes via ownership).
 
 **One-time setup (requires admin, run once at install time):**
 ```
 cage-setup.exe
-  Creates: SandboxUsers local group
-  Creates: Dedicated sandbox user account
-  Configures: Baseline WFP rules
+  Creates: <user>-CageUsers local group
+  Creates: <user>-CageOffline, <user>-CageLocalhostOnly local user accounts
+  Adds:    Both accounts to <user>-CageUsers group
+  Grants:  "Log on as a batch job" right to both accounts
+  Stores:  Account passwords encrypted with DPAPI in HKCU\Software\Cage\Credentials\
+  Applies: Read ACE for <user>-CageUsers on user profile directory
+  Installs: WFP provider + sublayer + static firewall rules:
+    - <user>-CageOffline SID:       BLOCK all outbound (V4 + V6)
+    - <user>-CageLocalhostOnly SID: PERMIT 127.0.0.1/::1 (high weight) + BLOCK rest (low weight)
 ```
+
+WFP rules are **static** — installed once at setup time, not per-session.
+
+**Per-workspace+policy setup (requires admin, one-time per workspace+policy combination):**
+
+Different policies grant different global writable paths, so setup is per (workspace, policy) pair. A single elevated invocation handles all necessary group creation and ACL application:
+
+```
+cage-setup --prepare <path> --policy <name>
+  Validates: <path> is not the user profile root (C:\Users\<user>) — prevents O(n) home-dir pollution
+
+  Workspace group (if not cached):
+    Creates:   <user>-CageWS-<hash> local group
+    Adds:      <user>-CageOffline and <user>-CageLocalhostOnly as members
+    Applies:   Inheritable write ACE for <user>-CageWS-<hash> on <path>
+               (SetNamedSecurityInfoW propagates to all existing children, O(n), synchronous)
+    Stores:    Group SID + path in HKCU\Software\Cage\Workspaces\<hash>
+
+  Policy group (if not cached):
+    Creates:   <user>-CagePolicy-<hash> local group
+    Adds:      Both sandbox accounts as members
+    Applies:   Inheritable write ACE for <user>-CagePolicy-<hash> on each global writable path
+    Stores:    Group SID + paths in HKCU\Software\Cage\Policies\<hash>
+
+  Deny ACEs (if not already applied):
+    Applies:   Inheritable deny ACE for <user>-CageUsers on each write_restricted_path
+```
+
+Creating local groups (`NetLocalGroupAdd`, `NetLocalGroupAddMembers`) requires admin privileges. This is a one-time cost per workspace+policy combination — subsequent sessions reuse the cached groups and ACEs. If the workspace group already exists (from a previous run with a different policy), only the policy group is created.
 
 **Runtime (no admin needed):**
 ```
-CreateRestrictedToken(current_token, strip=[dangerous SIDs])
-Set ACLs: GRANT SandboxSID full-control on $CWD
-Add WFP rule: BLOCK outbound for SandboxSID
-CreateProcessWithToken(restricted_token, "agent.exe ...")
-[on exit]: Remove WFP rule, clean up ACLs
+1. Select identity based on network policy:
+     none     → LogonUser("<user>-CageOffline", decrypt_password())
+     localhost → LogonUser("<user>-CageLocalhostOnly", decrypt_password())
+     full     → OpenProcessToken(current_process)
+
+2. Look up workspace group from HKCU\Software\Cage\Workspaces\<hash>
+   Look up policy group from HKCU\Software\Cage\Policies\<hash>
+     Error if not found → prompt user to run cage-setup --prepare <path> --policy <name>
+
+3. CreateRestrictedToken(token,
+     SidsToRestrict = [<user>-CageWS-<hash>, <user>-CagePolicy-<hash>,
+                       <user>-CageUsers, BUILTIN\Users, Everyone,
+                       RESTRICTED, LogonSID],
+     SidsToDisable  = [Administrators, ...dangerous groups...])
+
+4. CreateProcessAsUserW(restricted_token, "agent.exe ...")
+
+5. [on exit]: No ACL cleanup needed (workspace ACEs are persistent/cached)
 ```
 
-**Signal handling:** Unlike Linux/macOS where `exec()` replaces the cage process, on Windows `CreateProcessWithToken` keeps cage as the parent process. Explicit signal forwarding (Ctrl+C, Ctrl+Break) must be implemented to properly terminate the sandboxed process.
+**How the dual access check enforces write scoping:**
 
-**Implementation approach:** Implement our own Windows sandbox module based on this approach. The `windows-sandbox-rs` crate depends on internal Codex workspace crates (`codex-protocol`, `codex-utils-absolute-path`, etc.) that are not published to crates.io, so we cannot vendor just `lib.rs`. Instead, write our own module using the Windows APIs directly:
+| Path | Normal check (token's enabled SIDs) | Restricting check (SidsToRestrict) | Net |
+|---|---|---|---|
+| `$CWD` (workspace) | CageWS-<hash> write ACE ✓ (account is group member) | CageWS-<hash> write ACE ✓ (in restricting list) | WRITE |
+| `%TEMP%` (global writable) | CagePolicy-<hash> write ACE ✓ (account is group member) | CagePolicy-<hash> write ACE ✓ | WRITE |
+| User profile (read) | CageUsers read ACE ✓ | CageUsers in restricting list ✓ | READ |
+| System paths (read) | BUILTIN\Users ✓ | Users/Everyone in restricting list ✓ | READ |
+| `.git/` (restricted) | CageUsers deny ACE ✗ | — | DENIED |
+| Other locations | Maybe read ✓ | No restricting SID ACE ✗ | DENIED |
+| Other workspace B | Not member of CageWS-B ✗ | — | DENIED |
 
-- `windows` crate (v0.58) for `CreateRestrictedToken`, ACL functions, WFP APIs
-- `windows-sys` crate (v0.52) for lower-level system calls
-- Reference their implementation (~500 lines) for the approach, but use our own `SandboxPolicy` type
+One ACE per workspace path (`CageWS-<hash>`) serves both checks. Cross-workspace isolation works at **both** check levels: the account is not a member of another workspace's group, so the normal check fails before the restricting check is even evaluated.
 
-**TODOs for implementation:**
-- **WFP SID scoping:** Research Codex `windows-sandbox-rs` implementation for proper SID scoping. The restricted token uses the same user SID as the normal user; WFP must distinguish sandboxed vs unsandboxed processes.
-- **Concurrent sessions:** Research how to handle multiple concurrent cage sessions. May need unique session SIDs (via `SidsToRestrict`) so WFP rules don't conflict between sessions.
+**ACL modifications happen during `cage-setup --prepare`.** The `--prepare` command runs elevated to install WFP rules, then drops elevation for ACL modifications. `SetNamedSecurityInfoW` uses the user's token at that point. The user can only modify DACLs on objects they own or have `WRITE_DAC` on. This guarantees sandbox groups/accounts never receive permissions beyond what the user themselves could grant — no accidental escalation to system paths.
+
+**Signal handling:** `CreateProcessAsUserW` keeps cage as the parent process. Explicit signal forwarding (Ctrl+C, Ctrl+Break) must be implemented.
+
+**Process launch (TBD):** `LogonUser` → `CreateRestrictedToken` → `CreateProcessAsUserW` flow requires `SeIncreaseQuotaPrivilege`. The exact mechanism is deferred to implementation — options include: (A) grant the privilege at setup, (B) use `CreateProcessWithLogonW` (simpler, no restricted token), or (C) LocalSystem helper service.
+
+**Credential management:** Account passwords generated randomly at setup time, encrypted with DPAPI (user + machine bound), stored in `HKCU\Software\Cage\Credentials\`. At runtime, decrypt and pass to `LogonUser`.
+
+**Concurrent sessions:**
+
+| Scenario | Network | Filesystem |
+|---|---|---|
+| `none` + `localhost` | Fully isolated (different accounts, static WFP) | Fully isolated (different workspace groups, accounts not members of each other's groups) |
+| `none` + `full` | Fully isolated | Fully isolated |
+| Two `none`, different workspaces | Correct (same WFP rule) | Fully isolated — account is member of its own CageWS group but not the other's; normal check fails for the other workspace |
+| Two `none`, same workspace | Correct | **Shared** — same account, same workspace group membership |
+
+**Group caching:** Workspace and policy groups + ACEs persist across sessions. First `cage-setup --prepare` for a workspace pays O(n) ACL propagation cost; subsequent sessions are O(1) (registry lookup only). Periodic cleanup (`cage cleanup`) removes groups unused for N days. `cage-setup --uninstall` removes all accounts, groups, WFP rules, ACEs, and registry keys.
+
+**Implementation approach:** Write our own module using Windows APIs directly:
+- `windows` crate (v0.58) for `CreateRestrictedToken`, `LogonUser`, `SetNamedSecurityInfoW`, WFP APIs
+- State management via `HKCU\Software\Cage\` registry keys
 
 **Alternatives rejected:**
 
 | Option | Verdict |
 |---|---|
 | Windows Sandbox (WSB) | Full Hyper-V VM with a separate Windows install. Cannot use host MSVC/Win32 SDK. |
-| AppContainer | Requires app to declare capabilities via manifest. Cannot wrap arbitrary CLI tools. |
+| AppContainer | Deny-by-default filesystem model. Network isolation is good but requires extensive ACL grants for read access to user files. Wrong trade-off. |
 | WSL2 | Different kernel, different filesystem view. Breaks Windows-native toolchains. |
+| Pure account switching (no SidsToRestrict) | O(n) ACL cost per session (no caching). Codex approach — leads to broad home-dir grants and ACL pollution. |
+| Pure SidsToRestrict (no account switching) | Restricting SIDs invisible to WFP. Cannot enforce network policy. |
 
 ---
 
@@ -568,7 +676,7 @@ MCP servers communicate over Unix domain sockets (Linux/macOS) or named pipes (W
 ```
 The seccomp filter (when used for `localhost` network policy) explicitly allows `AF_UNIX` connections.
 
-**TODO:** Research MCP socket path discovery mechanism. Currently using hardcoded path for Phase 1.
+**Phase 1 MCP socket path:** Read from the `MCP_SOCKET` environment variable (or the agent-specific variable used by the tool being wrapped, e.g., `OPENCODE_MCP_SOCKET`). If unset, no socket passthrough is configured and the agent communicates without MCP. Proper discovery (querying a running MCP daemon or reading agent config) is deferred to Phase 3.
 
 **macOS (Seatbelt):** The profile includes `(allow network-outbound (remote unix-socket))`. The socket path must also be readable (allowed by `(allow default)`).
 
@@ -673,7 +781,7 @@ EXAMPLES:
 - [ ] Windows: `cage-setup.exe` installer (one-time, requires admin)
 - [ ] Windows: Testing and validation
 - [ ] Windows: MCP socket passthrough
-- [ ] Cleanup on exit (temp dirs, Windows firewall rules)
+- [ ] Cleanup on exit (temp dirs)
 - [ ] Integration tests for Windows sandbox
 
 ### Phase 2 — Enhanced Features (Weeks 6-7)
