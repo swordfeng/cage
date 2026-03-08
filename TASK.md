@@ -13,9 +13,9 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Embed `config/cage.toml` via `include_str!` at compile time for bundled defaults
 
 ### T1.2 — CLI argument parsing (`src/cli.rs`)
-- [ ] `clap` derive struct with all flags from SPEC §9: `--policy`, `--allow-network`, `--no-sandbox`, `--config`, `--passthrough`, `--writable`, `--write-restrict`, `--read-restrict`, `-v/--verbose`, `--dry-run`
-- [ ] Positional `<COMMAND> [ARGS]...` with `trailing_var_arg = true`
-- [ ] `--policy` accepts `NAME` (Phase 1); document `NAME+NAME` as Phase 2
+- [x] `clap` derive struct with all flags from SPEC §9: `--policy`, `--allow-network`, `--no-sandbox`, `--config`, `--passthrough`, `--writable`, `--write-restrict`, `--read-restrict`, `-v/--verbose`, `--dry-run`
+- [x] Positional `<COMMAND> [ARGS]...` with `trailing_var_arg = true` and `allow_hyphen_values`
+- [x] `--policy` accepts `NAME` (Phase 1); documented `NAME+NAME` as Phase 2 in help text
 
 ### T1.3 — Policy types (`src/policy/types.rs`)
 - [ ] Define `SandboxPolicy`, `NetworkPolicy`, `EnvMode`, `EnvPolicy`, `CommandPolicy`, `Config` per SPEC §4.4
