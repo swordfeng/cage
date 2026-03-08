@@ -1,0 +1,46 @@
+# Default bundled configuration for cage
+# This is embedded in the binary via include_str!
+
+[policies.default]
+writable_roots = ["$CWD"]
+write_restricted_paths = ["$CWD/.git", "$CWD/.env"]
+read_restricted_paths = ["~/.ssh", "~/.aws", "~/.gnupg"]
+network = "full"
+
+[policies.default.env]
+mode = "blocklist"
+block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "AWS_*", "GITHUB_*"]
+set = { CAGE = "1" }
+
+[policies.strict]
+writable_roots = ["$CWD"]
+write_restricted_paths = ["$CWD/.git", "$CWD/.env"]
+read_restricted_paths = ["~/.ssh", "~/.aws", "~/.config", "~/.gnupg"]
+network = "none"
+
+[policies.strict.env]
+mode = "allowlist"
+allow = ["PATH"]
+set = { CAGE = "1" }
+
+[[command_policy]]
+pattern = "opencode"
+policy = "default"
+
+[[command_policy]]
+pattern = "codex"
+policy = "default"
+
+[[command_policy]]
+pattern = "claude"
+policy = "default"
+
+[[command_policy]]
+pattern = "aider"
+policy = "strict"
+
+[platform.linux]
+fail_on_sandbox_error = true
+
+[platform.macos]
+fail_on_sandbox_error = true

@@ -7,10 +7,10 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 ## Phase 1a — Core Platforms (Weeks 1–3)
 
 ### T1.1 — Project scaffold
-- [ ] `cargo new cage --bin`; configure workspace layout per SPEC §3.1
-- [ ] `Cargo.toml`: add `clap` (v4, derive), `serde`, `toml`, `scopeguard`
-- [ ] Platform-gated dependency blocks: `seccompiler = "0.4"` (Linux, phase 1b), `windows = "0.58"` (Windows, phase 1b) per SPEC §12
-- [ ] Embed `config/cage.toml` via `include_str!` at compile time for bundled defaults
+- [x] `cargo new cage --bin`; configure workspace layout per SPEC §3.1
+- [x] `Cargo.toml`: add `clap` (v4, derive), `serde`, `toml`, `scopeguard`
+- [x] Platform-gated dependency blocks: `seccompiler = "0.4"` (Linux, phase 1b), `windows = "0.58"` (Windows, phase 1b) per SPEC §12
+- [x] Embed `config/cage.toml` via `include_str!` at compile time for bundled defaults
 
 ### T1.2 — CLI argument parsing (`src/cli.rs`)
 - [ ] `clap` derive struct with all flags from SPEC §9: `--policy`, `--allow-network`, `--no-sandbox`, `--config`, `--passthrough`, `--writable`, `--write-restrict`, `--read-restrict`, `-v/--verbose`, `--dry-run`
