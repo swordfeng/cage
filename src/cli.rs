@@ -22,10 +22,6 @@ pub struct Args {
     #[arg(short, long, value_name = "PATH")]
     pub config: Option<PathBuf>,
 
-    /// Paths to passthrough to sandbox unchanged
-    #[arg(long, value_name = "PATH")]
-    pub passthrough: Vec<PathBuf>,
-
     /// Additional writable paths
     #[arg(long, value_name = "PATH")]
     pub writable: Vec<PathBuf>,
@@ -120,8 +116,6 @@ mod tests {
         // Note: using 'cat' instead of 'sh -c' because '-c' conflicts with --config short flag
         let args = Args::parse_from([
             "cage",
-            "--passthrough",
-            "/tmp/socket",
             "--writable",
             "/workspace",
             "--write-restrict",
@@ -132,7 +126,6 @@ mod tests {
             "file.txt",
         ]);
 
-        assert_eq!(args.passthrough, vec![PathBuf::from("/tmp/socket")]);
         assert_eq!(args.writable, vec![PathBuf::from("/workspace")]);
         assert_eq!(args.write_restrict, vec![PathBuf::from(".git")]);
         assert_eq!(args.read_restrict, vec![PathBuf::from("/etc/passwd")]);

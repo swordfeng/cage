@@ -716,7 +716,6 @@ OPTIONS:
         --allow-network             Shorthand: use current policy but override network to "full"
         --no-sandbox                Run command unsandboxed (logs a warning)
         --config <PATH>             Use alternative config file instead of ~/.config/cage/cage.toml
-        --passthrough <PATH>        Add an extra read-only passthrough path (repeatable)
         --writable <PATH>           Add an extra writable root (repeatable)
         --write-restrict <PATH>     Add an extra write-restricted path (repeatable)
         --read-restrict <PATH>      Add an extra read-restricted path (repeatable)
