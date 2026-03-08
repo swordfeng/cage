@@ -23,11 +23,11 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Glob matching helper `glob_match(pattern: &str, name: &str) -> bool` — support `*` and `?` only (no need for full glob crate)
 
 ### T1.4 — Config loading and merge (`src/config.rs`)
-- [ ] Deserialize TOML into `Config` via `serde`; define `#[derive(Deserialize)]` on all policy types
-- [ ] Load and layer: bundled defaults → `~/.config/cage/cage.toml` → `.cage.toml` (walk up from `$CWD` to home dir) → CLI flag overrides
-- [ ] Policy lookup by name; clear error if named policy doesn't exist
-- [ ] `command_policy` matching: `Config::default_policy_for(command: &str)` using `Path::file_stem()` + `glob_match()` per SPEC §4.1
-- [ ] Policy selection logic: `--policy` flag → `command_policy` match → `"default"` policy → hard error
+- [x] Deserialize TOML into `Config` via `serde`; define `#[derive(Deserialize)]` on all policy types
+- [x] Load and layer: bundled defaults → `~/.config/cage/cage.toml` → `.cage.toml` (walk up from `$CWD` to home dir) → CLI flag overrides
+- [x] Policy lookup by name; clear error if named policy doesn't exist
+- [x] `command_policy` matching: `Config::default_policy_for(command: &str)` using `Path::file_stem()` + `glob_match()` per SPEC §4.1
+- [x] Policy selection logic: `--policy` flag → `command_policy` match → `"default"` policy → hard error
 
 ### T1.5 — Variable expansion (`src/policy/merge.rs`)
 - [ ] `expand_path(template: &str, cwd: &Path) -> Option<PathBuf>`: handle `~` (home dir), `$CWD` (cage invocation dir), `$VAR` (env lookup)

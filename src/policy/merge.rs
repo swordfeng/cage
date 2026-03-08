@@ -10,7 +10,7 @@ impl EnvPolicy {
     pub fn filter(&self, env: &HashMap<String, String>) -> HashMap<String, String> {
         let mut result = HashMap::new();
 
-        match self.mode {
+        match self.mode() {
             EnvMode::Allowlist => {
                 // Only allow vars matching any pattern in self.allow
                 for (key, value) in env {
@@ -135,7 +135,7 @@ mod tests {
         .collect();
 
         let policy = EnvPolicy {
-            mode: EnvMode::Allowlist,
+            mode: Some(EnvMode::Allowlist),
             allow: vec!["PATH".to_string()],
             block: vec![],
             set: HashMap::new(),
@@ -160,7 +160,7 @@ mod tests {
         .collect();
 
         let policy = EnvPolicy {
-            mode: EnvMode::Blocklist,
+            mode: Some(EnvMode::Blocklist),
             allow: vec![],
             block: vec!["*_TOKEN".to_string(), "*KEY".to_string()],
             set: HashMap::new(),
@@ -185,7 +185,7 @@ mod tests {
         set.insert("CAGE".to_string(), "1".to_string());
 
         let policy = EnvPolicy {
-            mode: EnvMode::Allowlist,
+            mode: Some(EnvMode::Allowlist),
             allow: vec!["PATH".to_string()],
             block: vec![],
             set,
@@ -209,7 +209,7 @@ mod tests {
         set.insert("CAGE".to_string(), "1".to_string());
 
         let policy = EnvPolicy {
-            mode: EnvMode::Blocklist,
+            mode: Some(EnvMode::Blocklist),
             allow: vec![],
             block: vec!["SECRET".to_string()],
             set,
@@ -239,7 +239,7 @@ mod tests {
         set.insert("CAGE".to_string(), "1".to_string());
 
         let policy = EnvPolicy {
-            mode: EnvMode::Blocklist,
+            mode: Some(EnvMode::Blocklist),
             allow: vec![],
             block: vec![
                 "*_TOKEN".to_string(),
@@ -277,7 +277,7 @@ mod tests {
         set.insert("CAGE".to_string(), "1".to_string());
 
         let policy = EnvPolicy {
-            mode: EnvMode::Allowlist,
+            mode: Some(EnvMode::Allowlist),
             allow: vec!["PATH".to_string()],
             block: vec![],
             set,

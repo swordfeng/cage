@@ -102,7 +102,7 @@ $ cage opencode
 1.  Detect OS and capabilities (bwrap availability, user namespace support)
 2.  Load and merge policy:
       ~/.config/cage/cage.toml          (user config)
-      .cage.toml                        (project override, if present)
+      .cage.toml                        (project override, CWD only, if present)
       CLI flags                         (highest precedence)
       Policy selection:
         - If `--policy <name>` is specified, use that policy
