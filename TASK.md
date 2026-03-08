@@ -35,9 +35,9 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Drop path entry silently if referenced `$VAR` is unset; log at `-v` level
 
 ### T1.6 — Session temp dir (`src/main.rs`)
-- [ ] Create `/tmp/cage-{PID}-{RAND}/` (Linux/macOS) or `%TEMP%\cage-{PID}-{RAND}\` (Windows) before sandbox setup
-- [ ] Register cleanup via `scopeguard` `defer!` to remove on exit (including on panic)
-- [ ] Pass temp dir path to platform backend
+- [x] Create `/tmp/cage-{PID}-{RAND}/` (Linux/macOS) or `%TEMP%\cage-{PID}-{RAND}\` (Windows) before sandbox setup
+- [x] Register cleanup via `scopeguard` `defer!` to remove on exit (including on panic)
+- [x] Pass temp dir path to platform backend
 
 ### T1.7 — Linux: bubblewrap launcher (`src/platform/linux.rs`)
 - [ ] Build `bwrap` argv from resolved `SandboxPolicy`:

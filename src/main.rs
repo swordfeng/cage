@@ -1,8 +1,10 @@
+use anyhow::Context;
 use clap::Parser;
 use scopeguard::defer;
 use std::fs;
 use std::path::PathBuf;
 use std::process;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod cli;
 mod config;
@@ -79,11 +81,25 @@ fn run(args: cli::Args) -> anyhow::Result<()> {
     process::exit(exit_code);
 }
 
-/// Create session temp directory
-/// TODO: T1.6 - Use /tmp/cage-{PID}-{RAND}/ format
+/// Create session temp directory with unique name
+/// Format: /tmp/cage-{PID}-{RAND}/ (Linux/macOS) or %TEMP%\cage-{PID}-{RAND}\ (Windows)
 fn create_session_tmpdir() -> anyhow::Result<PathBuf> {
-    let tmpdir = std::env::temp_dir().join(format!("cage-{}", process::id()));
-    fs::create_dir_all(&tmpdir)?;
+    let pid = process::id();
+    // Use timestamp nanos as random component (good enough for this use case)
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let rand_component = nanos % 10000;
+
+    let tmpdir = std::env::temp_dir().join(format!("cage-{}-{}", pid, rand_component));
+    fs::create_dir_all(&tmpdir).with_context(|| {
+        format!(
+            "failed to create session temp directory: {}",
+            tmpdir.display()
+        )
+    })?;
+
     Ok(tmpdir)
 }
 
@@ -95,5 +111,24 @@ mod tests {
     fn test_bundled_config_embedded() {
         // Verify bundled config is embedded
         assert!(BUNDLED_CONFIG.contains("[policies.default]"));
+    }
+
+    #[test]
+    fn test_session_tmpdir_creation() {
+        let tmpdir = create_session_tmpdir().unwrap();
+
+        // Should exist
+        assert!(tmpdir.exists());
+
+        // Should be in temp directory
+        assert!(tmpdir.starts_with(std::env::temp_dir()));
+
+        // Should contain cage prefix and PID
+        let name = tmpdir.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("cage-"));
+        assert!(name.contains(&process::id().to_string()));
+
+        // Cleanup test directory
+        let _ = fs::remove_dir_all(&tmpdir);
     }
 }
