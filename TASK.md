@@ -18,9 +18,9 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] `--policy` accepts `NAME` (Phase 1); documented `NAME+NAME` as Phase 2 in help text
 
 ### T1.3 — Policy types (`src/policy/types.rs`)
-- [ ] Define `SandboxPolicy`, `NetworkPolicy`, `EnvMode`, `EnvPolicy`, `CommandPolicy`, `Config` per SPEC §4.4
-- [ ] Implement `EnvPolicy::filter(env: &HashMap<String,String>) -> HashMap<String,String>` — apply allowlist/blocklist glob matching, then apply `set` overrides
-- [ ] Glob matching helper `glob_match(pattern: &str, name: &str) -> bool` — support `*` and `?` only (no need for full glob crate)
+- [x] Define `SandboxPolicy`, `NetworkPolicy`, `EnvMode`, `EnvPolicy`, `CommandPolicy`, `Config` per SPEC §4.4
+- [x] Implement `EnvPolicy::filter(env: &HashMap<String,String>) -> HashMap<String,String>` — apply allowlist/blocklist glob matching, then apply `set` overrides
+- [x] Glob matching helper `glob_match(pattern: &str, name: &str) -> bool` — support `*` and `?` only (no need for full glob crate)
 
 ### T1.4 — Config loading and merge (`src/config.rs`)
 - [ ] Deserialize TOML into `Config` via `serde`; define `#[derive(Deserialize)]` on all policy types
