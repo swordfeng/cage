@@ -84,6 +84,39 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] `--no-sandbox`: command runs, exits with forwarded exit code
 - [ ] Run cage as subprocess via `Command`; check exit code forwarding
 
+### T1.12 — GUI/Audio Policy Fields (`src/policy/types.rs`)
+- [ ] Add `enable_gui: Option<bool>` to `SandboxPolicy` struct
+- [ ] Add `enable_audio: Option<bool>` to `SandboxPolicy` struct
+- [ ] Update merge logic: override only if explicitly set (per SPEC §4.2 merge rules)
+- [ ] Add default getter methods: return `true` if field is `None`
+- [ ] Update bundled config `cage.toml` with `enable_gui = true` and `enable_audio = true` in both policies
+
+### T1.13 — Linux GUI/Audio Passthrough (`src/platform/linux.rs`)
+- [ ] When `enable_gui` is true (default):
+  - Add `--ro-bind $XDG_RUNTIME_DIR/wayland-0 $XDG_RUNTIME_DIR/wayland-0` if Wayland socket exists
+  - Add `--ro-bind /tmp/.X11-unix /tmp/.X11-unix` for X11 (read-only, sockets are writable in practice)
+  - Add `--dev-bind /dev/dri /dev/dri` for GPU access (DRI/DRM)
+  - **Do NOT add `--unshare-ipc`** (required for X11 shared memory extension)
+- [ ] When `enable_audio` is true (default):
+  - Add `--ro-bind $XDG_RUNTIME_DIR/pulse/native $XDG_RUNTIME_DIR/pulse/native` if PulseAudio socket exists
+  - Add `--ro-bind $XDG_RUNTIME_DIR/pipewire-0 $XDG_RUNTIME_DIR/pipewire-0` if PipeWire socket exists
+- [ ] Update `generate_bwrap_argv` to accept GUI/audio flags and build appropriate bind mounts
+- [ ] Add `--dry-run` test to verify Wayland/X11/DRI binds appear when GUI enabled
+
+### T1.14 — macOS GUI/Audio Passthrough (`src/platform/macos.rs`)
+- [ ] When `enable_gui` is true (default):
+  - Add `(allow iokit-open)` to Seatbelt profile for graphics/display access
+  - Add `(allow device*)` for input devices
+- [ ] When `enable_audio` is true (default):
+  - Add `(allow device*)` to Seatbelt profile for audio device access
+- [ ] Update `generate_seatbelt_profile` to conditionally include these rules
+- [ ] Add `--dry-run` test to verify profile includes IOKit rules when GUI enabled
+
+### T1.15 — Windows GUI/Audio Support (`src/platform/windows.rs`)
+- [ ] Accept `enable_gui` and `enable_audio` in policy (no-op implementation - per user request)
+- [ ] Add documentation comment explaining Windows inherently supports GUI/audio, flags are for config compatibility
+- [ ] Update `generate_windows_sandbox_config` to log when these flags are set (for visibility in `--dry-run`)
+
 ---
 
 ## Phase 1b — Windows + Localhost Network (Weeks 4–5)
@@ -165,6 +198,18 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] Cross-workspace isolation: `none`-session in workspace A cannot write to workspace B (different restricting SIDs)
 - [ ] Workspace caching: second session to same workspace skips O(n) ACL propagation
 - [ ] Exit code forwarding
+
+### T2.8 — Linux: Seccomp Syscall Blocking (General Security)
+- [ ] Build BPF filter via `seccompiler` to block dangerous syscalls (all others → `SECCOMP_RET_ALLOW`):
+  - `mount`, `umount`, `umount2`, `pivot_root`, `chroot` - Filesystem escape
+  - `unshare`, `setns` - Namespace switching
+  - `add_key`, `keyctl`, `request_key` - Kernel keyring access
+  - `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `fspick`, `mount_setattr` - New mount APIs (CVE-2021-41133)
+  - `ioctl` with `TIOCSTI`, `TIOCLINUX` - Terminal injection attacks (CVE-2017-5226, CVE-2023-28100)
+- [ ] Block non-standard socket families: `AF_BLUETOOTH`, `AF_CAN`, etc. (allow `AF_UNIX`, `AF_INET`, `AF_INET6`)
+- [ ] Apply filter via `seccomp(SECCOMP_SET_MODE_FILTER)` before execing bwrap
+- [ ] Log blocked syscall attempts at `-v` level
+- [ ] Test: attempt `mount` inside sandbox → should get EPERM
 
 ---
 

@@ -1,3 +1,5 @@
 /target
 /.cargo
 __pycache__/
+/.env
+/.cage.toml

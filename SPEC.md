@@ -143,6 +143,8 @@ writable_roots = ["$CWD", "$TMPDIR", "~/.cache"]
 write_restricted_paths = ["$CWD/.git", "$CWD/.env", "~/.ssh", "~/.gnupg", "~/.aws", "~/.config"]
 read_restricted_paths = ["~/.ssh", "~/.aws", "~/.gnupg"]  # Block common secret paths; add more gradually
 network = "full"
+enable_gui = true                     # passthrough display server (Wayland/X11) and GPU
+enable_audio = true                   # passthrough PulseAudio/PipeWire sockets
 [policies.default.env]
 mode = "blocklist"
 block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "AWS_*", "GITHUB_*"]
@@ -153,6 +155,8 @@ writable_roots = ["$CWD"]
 write_restricted_paths = ["$CWD/.git", "$CWD/.env"]
 read_restricted_paths = ["~/.ssh", "~/.aws", "~/.config", "~/.gnupg"]
 network = "none"
+enable_gui = true                     # GUI/audio enabled by default even in strict
+enable_audio = true
 [policies.strict.env]
 mode = "allowlist"                    # "allowlist" | "blocklist"
 allow = ["PATH"]                      # for allowlist mode: only these vars
@@ -251,6 +255,8 @@ Merge rules (permitting mode — merging adds permissions):
 - `write_restricted_paths`: **intersection** (only restrict if ALL policies agree)
 - `read_restricted_paths`: **intersection** (only restrict if ALL policies agree)
 - `network`: **most permissive wins** (`full` > `localhost` > `none`)
+- `enable_gui`: **AND** (disable if ANY policy disables it)
+- `enable_audio`: **AND** (disable if ANY policy disables it)
 - `env.mode`: if any policy uses `blocklist`, result is `blocklist` (more permissive); otherwise `allowlist`
 - `env.allow`: **union** (all allowed vars from merged policies)
 - `env.block`: **intersection** (only block if ALL policies agree)
@@ -277,6 +283,8 @@ pub struct SandboxPolicy {
     pub read_restricted_paths: Vec<PathBuf>,   // paths blocked from reading
     pub network: NetworkPolicy,
     pub env: EnvPolicy,
+    pub enable_gui: bool,                      // allow GUI display/audio passthrough (default: true)
+    pub enable_audio: bool,                    // allow audio passthrough (default: true)
 }
 
 pub enum NetworkPolicy {
@@ -382,6 +390,23 @@ bwrap \
 | `localhost` | `--share-net` | `SECCOMP_RET_USER_NOTIF` on `connect()` | Host network shared, but seccomp supervisor inspects every `connect()` call via `/proc/pid/mem`, allowing only `127.0.0.1`/`::1`/`AF_UNIX` and blocking all other destinations. |
 | `full` | `--share-net` | None | Unrestricted host network access. |
 
+**GUI passthrough (`enable_gui = true`):**
+
+When GUI is enabled, cage bind-mounts display server sockets and GPU device nodes into the sandbox:
+- Wayland: `--bind $XDG_RUNTIME_DIR/wayland-0 $XDG_RUNTIME_DIR/wayland-0` (if exists)
+- X11: `--ro-bind /tmp/.X11-unix /tmp/.X11-unix` (X11 UNIX domain sockets)
+- GPU: `--dev-bind /dev/dri /dev/dri` (DRI/DRM device nodes for OpenGL/Vulkan)
+
+GUI mode also **omits `--unshare-ipc`**, which is required for X11's shared memory extension (MIT-SHM) to work. This means the sandboxed process can use shared memory with the host, but only for display purposes.
+
+**Audio passthrough (`enable_audio = true`):**
+
+When audio is enabled, cage bind-mounts audio server sockets:
+- PulseAudio: `--bind $XDG_RUNTIME_DIR/pulse/native $XDG_RUNTIME_DIR/pulse/native` (if exists)
+- PipeWire: `--bind $XDG_RUNTIME_DIR/pipewire-0 $XDG_RUNTIME_DIR/pipewire-0` (if exists)
+
+Both GUI and audio passthrough are enabled by default. Set to `false` to disable passthrough for headless/non-interactive environments.
+
 **Seccomp for `localhost` policy (Phase 1b):** Uses `SECCOMP_RET_USER_NOTIF` (Linux ≥ 5.0) to intercept `connect()` syscalls. The supervisor inspects each `connect()` call's target address via `/proc/pid/mem` and allows only loopback and Unix domain socket destinations. Note: seccomp BPF cannot inspect sockaddr directly (it's behind a pointer) — the userspace supervisor is required for destination-level filtering.
 
 **Seccomp supervisor architecture:** The notification FD cannot be obtained inside bwrap's child process and handed back to cage after exec. The correct flow:
@@ -452,6 +477,25 @@ Note: Unix domain sockets require write permission to connect. Use `--bind` (rea
 - **Symlink canonicalization:** Always call `std::fs::canonicalize()` on all paths before embedding them in the profile. macOS resolves `/tmp` to `/private/tmp`; an unresolved `/tmp/cage-$PID` path in the profile will be silently denied by Seatbelt, causing the sandbox to misbehave without any error.
 - The `(allow default)` at the top means reads are allowed everywhere by default. Specific paths can be blocked with `(deny file-read*)` rules, which is how `read_restricted_paths` is implemented. This works well for blocking sensitive directories like `~/.ssh` while allowing general filesystem access.
 - **`write_restricted_paths`:** Implemented via `(deny file-write* (subpath "..."))` rules placed after the `(allow file-write* ...)` rules. In Seatbelt, later deny rules override earlier allows, so this works natively.
+
+**GUI passthrough (`enable_gui = true`):**
+
+When GUI is enabled, the Seatbelt profile includes IOKit access rules:
+```scheme
+(allow iokit-open)                      ; GPU/display access
+(allow device*)                         ; Input devices
+```
+
+This allows the sandboxed process to communicate with the graphics subsystem (Metal, OpenGL) and access input devices. GUI passthrough is enabled by default; set `enable_gui = false` for headless environments.
+
+**Audio passthrough (`enable_audio = true`):**
+
+When audio is enabled, the Seatbelt profile includes:
+```scheme
+(allow device*)                         ; Audio devices
+```
+
+Audio passthrough is enabled by default. macOS audio is handled through CoreAudio which requires device access permissions.
 
 **Alternatives evaluated and rejected:**
 
@@ -594,6 +638,15 @@ One ACE per workspace path (`CageWS-<hash>`) serves both checks. Cross-workspace
 | `none` + `full` | Fully isolated | Fully isolated |
 | Two `none`, different workspaces | Correct (same WFP rule) | Fully isolated — account is member of its own CageWS group but not the other's; normal check fails for the other workspace |
 | Two `none`, same workspace | Correct | **Shared** — same account, same workspace group membership |
+
+**GUI and Audio passthrough (`enable_gui`, `enable_audio`):**
+
+On Windows, GUI and audio passthrough work transparently with the restricted token model. The sandboxed process runs as a standard user account with access to the interactive desktop and window station, enabling display and audio output without additional configuration.
+
+- **GUI (`enable_gui = true`):** The sandboxed process inherits access to the interactive window station and desktop, allowing window creation and display output. GPU access works through the standard DirectX/OpenGL driver stack.
+- **Audio (`enable_audio = true`):** The sandboxed process can access Windows audio APIs (WASAPI, Core Audio) through the standard user token.
+
+Both settings are `true` by default. Setting to `false` has no effect on Windows — the sandbox accounts inherently have desktop/audio access. The flags are accepted in the config for cross-platform consistency (same config works on Linux/macOS/Windows).
 
 **Group caching:** Workspace and policy groups + ACEs persist across sessions. First `cage-setup --prepare` for a workspace pays O(n) ACL propagation cost; subsequent sessions are O(1) (registry lookup only). Periodic cleanup (`cage cleanup`) removes groups unused for N days. `cage-setup --uninstall` removes all accounts, groups, WFP rules, ACEs, and registry keys.
 
