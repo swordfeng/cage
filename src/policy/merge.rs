@@ -2,25 +2,33 @@ use crate::policy::types::{EnvMode, EnvPolicy};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-/// Expand variables in a path template.
+/// Expand variables in a path template and resolve relative paths.
 /// Supports:
 /// - `~` or `~user` - home directory expansion
 /// - `$CWD` - current working directory (passed as `cwd` parameter)
 /// - `$VAR` or `${VAR}` - environment variable lookup
+/// - Relative paths - resolved relative to cwd
 ///
 /// Returns None if a referenced environment variable is not set.
 pub fn expand_path(template: &str, cwd: &std::path::Path) -> Option<PathBuf> {
     // Handle ~ (home directory) expansion at the start
     if template.starts_with('~') {
-        return expand_tilde(template);
+        return expand_tilde(template, cwd);
     }
 
     // Handle all variables using a single pass
-    expand_all_vars(template, cwd)
+    let path = expand_all_vars(template, cwd)?;
+
+    // If the path is relative, resolve it against cwd
+    if path.is_relative() {
+        Some(cwd.join(path))
+    } else {
+        Some(path)
+    }
 }
 
 /// Expand ~ to home directory
-fn expand_tilde(template: &str) -> Option<PathBuf> {
+fn expand_tilde(template: &str, cwd: &std::path::Path) -> Option<PathBuf> {
     let home = dirs::home_dir()?;
 
     if template == "~" {
@@ -30,11 +38,21 @@ fn expand_tilde(template: &str) -> Option<PathBuf> {
     if template.starts_with("~/") {
         let rest = &template[2..];
         // Expand any variables in the rest of the path
-        return expand_all_vars(rest, &home);
+        let path = expand_all_vars(rest, &home)?;
+        // Handle relative paths after ~/ expansion
+        if path.is_relative() {
+            return Some(home.join(path));
+        }
+        return Some(path);
     }
 
-    // ~user syntax - not supported, treat as literal
-    Some(PathBuf::from(template))
+    // ~user syntax - not supported, treat as literal relative path
+    let path = PathBuf::from(template);
+    if path.is_relative() {
+        Some(cwd.join(path))
+    } else {
+        Some(path)
+    }
 }
 
 /// Expand all variables ($CWD, $VAR, ${VAR}) in a string
@@ -426,6 +444,26 @@ mod tests {
         let cwd = std::path::Path::new("/tmp");
         // This variable should not be set
         assert_eq!(expand_path("$CAGE_NONEXISTENT_VAR_XYZ", cwd), None);
+    }
+
+    #[test]
+    fn test_expand_path_relative() {
+        let cwd = std::path::Path::new("/workspace/project");
+
+        // Relative path should be resolved against cwd
+        let expanded = expand_path("src", cwd).unwrap();
+        assert!(expanded.to_string_lossy().contains("workspace"));
+        assert!(expanded.to_string_lossy().contains("project"));
+        assert!(expanded.to_string_lossy().contains("src"));
+
+        // ./relative path
+        let expanded = expand_path("./config", cwd).unwrap();
+        assert!(expanded.to_string_lossy().contains("config"));
+
+        // ../relative path
+        let expanded = expand_path("../other", cwd).unwrap();
+        assert!(expanded.to_string_lossy().contains("workspace"));
+        assert!(expanded.to_string_lossy().contains("other"));
     }
 
     #[test]
