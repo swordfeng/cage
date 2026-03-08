@@ -2,8 +2,83 @@ use crate::policy::types::{EnvMode, EnvPolicy};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Expand variables in a path template.
+/// Supports:
+/// - `~` or `~user` - home directory expansion
+/// - `$CWD` - current working directory (passed as `cwd` parameter)
+/// - `$VAR` or `${VAR}` - environment variable lookup
+///
+/// Returns None if a referenced environment variable is not set.
 pub fn expand_path(template: &str, cwd: &std::path::Path) -> Option<PathBuf> {
-    todo!("T1.5: Implement variable expansion for paths")
+    // Handle ~ (home directory) expansion at the start
+    if template.starts_with('~') {
+        return expand_tilde(template);
+    }
+
+    // Handle all variables using a single pass
+    expand_all_vars(template, cwd)
+}
+
+/// Expand ~ to home directory
+fn expand_tilde(template: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir()?;
+
+    if template == "~" {
+        return Some(home);
+    }
+
+    if template.starts_with("~/") {
+        let rest = &template[2..];
+        // Expand any variables in the rest of the path
+        return expand_all_vars(rest, &home);
+    }
+
+    // ~user syntax - not supported, treat as literal
+    Some(PathBuf::from(template))
+}
+
+/// Expand all variables ($CWD, $VAR, ${VAR}) in a string
+fn expand_all_vars(s: &str, cwd: &std::path::Path) -> Option<PathBuf> {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            // Check for ${VAR} syntax
+            if chars.peek() == Some(&'{') {
+                chars.next(); // consume '{'
+                let var_name: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                let var_value = lookup_var(&var_name, cwd)?;
+                result.push_str(&var_value);
+            } else {
+                // $VAR syntax - read until non-identifier char
+                let var_name: String = chars
+                    .by_ref()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if var_name.is_empty() {
+                    // Lone $ at end or followed by non-var char, treat literally
+                    result.push('$');
+                } else {
+                    let var_value = lookup_var(&var_name, cwd)?;
+                    result.push_str(&var_value);
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Some(PathBuf::from(result))
+}
+
+/// Look up a variable value ($CWD is special, others are env vars)
+fn lookup_var(name: &str, cwd: &std::path::Path) -> Option<String> {
+    if name == "CWD" {
+        Some(cwd.to_string_lossy().to_string())
+    } else {
+        std::env::var(name).ok()
+    }
 }
 
 impl EnvPolicy {
@@ -289,5 +364,86 @@ mod tests {
         assert!(!filtered.contains_key("HOME"));
         assert!(!filtered.contains_key("SECRET"));
         assert_eq!(filtered.get("CAGE"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn test_expand_path_cwd() {
+        let cwd = std::path::Path::new("/project");
+        let expanded = expand_path("$CWD", cwd).unwrap();
+        assert!(expanded.to_string_lossy().contains("project"));
+
+        let expanded = expand_path("$CWD/src", cwd).unwrap();
+        let expanded_str = expanded.to_string_lossy();
+        assert!(expanded_str.contains("project"));
+        assert!(expanded_str.contains("src"));
+    }
+
+    #[test]
+    fn test_expand_path_tilde() {
+        let home = dirs::home_dir().unwrap();
+        let cwd = std::path::Path::new("/tmp");
+
+        // ~ should expand to home
+        let expanded = expand_path("~", cwd).unwrap();
+        assert_eq!(expanded, home);
+
+        // ~/something should expand to home/something
+        let expanded = expand_path("~/projects", cwd).unwrap();
+        assert!(expanded.to_string_lossy().contains("projects"));
+    }
+
+    #[test]
+    fn test_expand_path_env_var() {
+        // Set up test environment variable
+        unsafe {
+            std::env::set_var("CAGE_TEST_VAR", "/test/path");
+        }
+        let cwd = std::path::Path::new("/tmp");
+
+        // $VAR syntax
+        let expanded = expand_path("$CAGE_TEST_VAR", cwd).unwrap();
+        assert!(expanded.to_string_lossy().contains("test"));
+        assert!(expanded.to_string_lossy().contains("path"));
+
+        // $VAR/suffix syntax
+        let expanded = expand_path("$CAGE_TEST_VAR/subdir", cwd).unwrap();
+        let expanded_str = expanded.to_string_lossy();
+        assert!(expanded_str.contains("test"));
+        assert!(expanded_str.contains("subdir"));
+
+        // ${VAR} syntax
+        let expanded = expand_path("${CAGE_TEST_VAR}", cwd).unwrap();
+        assert!(expanded.to_string_lossy().contains("test"));
+
+        // Clean up
+        unsafe {
+            std::env::remove_var("CAGE_TEST_VAR");
+        }
+    }
+
+    #[test]
+    fn test_expand_path_unset_var_returns_none() {
+        let cwd = std::path::Path::new("/tmp");
+        // This variable should not be set
+        assert_eq!(expand_path("$CAGE_NONEXISTENT_VAR_XYZ", cwd), None);
+    }
+
+    #[test]
+    fn test_expand_path_mixed() {
+        unsafe {
+            std::env::set_var("CAGE_MIXED", "data");
+        }
+        let home = dirs::home_dir().unwrap();
+        let cwd = std::path::Path::new("/workspace");
+
+        // Test combination of tilde and env var: ~/cache/$CAGE_MIXED
+        let expanded = expand_path("~/cache/$CAGE_MIXED", cwd).unwrap();
+        let expanded_str = expanded.to_string_lossy();
+        assert!(expanded_str.contains("cache"));
+        assert!(expanded_str.contains("data"));
+
+        unsafe {
+            std::env::remove_var("CAGE_MIXED");
+        }
     }
 }

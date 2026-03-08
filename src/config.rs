@@ -1,7 +1,8 @@
 use crate::cli::Args;
-use crate::policy::merge::glob_match;
+use crate::policy::merge::{expand_path, glob_match};
 use crate::policy::types::{Config, SandboxPolicy};
 use anyhow::{bail, Context, Result};
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -104,9 +105,9 @@ impl MergedConfig {
             .with_context(|| format!("policy '{}' not found", name))
     }
 
-    /// Resolve the final policy, applying CLI overrides on top.
+    /// Resolve the final policy, applying CLI overrides and variable expansion.
     /// This is the primary API for callers that need a ready-to-use policy.
-    pub fn resolve_policy(&self, args: &Args) -> Result<SandboxPolicy> {
+    pub fn resolve_policy(&self, args: &Args, verbose: bool) -> Result<SandboxPolicy> {
         let name = self.resolve_policy_name(args)?;
         let mut policy = self.get_policy(&name)?.clone();
 
@@ -122,6 +123,14 @@ impl MergedConfig {
         if args.allow_network {
             policy.network = Some(crate::policy::types::NetworkPolicy::Full);
         }
+
+        // Get the current working directory for $CWD expansion
+        let cwd = env::current_dir().context("failed to get current working directory")?;
+
+        // Expand variables in all path fields
+        policy.writable_roots = expand_paths(&policy.writable_roots, &cwd, verbose);
+        policy.write_restricted_paths = expand_paths(&policy.write_restricted_paths, &cwd, verbose);
+        policy.read_restricted_paths = expand_paths(&policy.read_restricted_paths, &cwd, verbose);
 
         Ok(policy)
     }
@@ -173,6 +182,30 @@ impl MergedConfig {
     pub fn config(&self) -> &Config {
         &self.inner
     }
+}
+
+/// Expand variables in a list of paths.
+/// Drops paths that fail to expand (e.g., unset environment variables).
+/// Logs dropped paths at verbose level.
+fn expand_paths(paths: &[PathBuf], cwd: &Path, verbose: bool) -> Vec<PathBuf> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let path_str = path.to_string_lossy();
+            match expand_path(&path_str, cwd) {
+                Some(expanded) => Some(expanded),
+                None => {
+                    if verbose {
+                        eprintln!(
+                            "Warning: Dropping path with unset variable: {}",
+                            path.display()
+                        );
+                    }
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 /// Load a single config file from disk
@@ -324,7 +357,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = config.resolve_policy(&args).unwrap();
+        let policy = config.resolve_policy(&args, false).unwrap();
 
         // Should include the extra writable path
         assert!(policy
@@ -344,7 +377,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = config.resolve_policy(&args).unwrap();
+        let policy = config.resolve_policy(&args, false).unwrap();
 
         // allow_network should override to Full
         assert!(matches!(policy.network, Some(NetworkPolicy::Full)));
@@ -359,7 +392,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = config.resolve_policy(&args).unwrap();
+        let policy = config.resolve_policy(&args, false).unwrap();
 
         assert!(policy
             .writable_roots

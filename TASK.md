@@ -30,9 +30,9 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Policy selection logic: `--policy` flag → `command_policy` match → `"default"` policy → hard error
 
 ### T1.5 — Variable expansion (`src/policy/merge.rs`)
-- [ ] `expand_path(template: &str, cwd: &Path) -> Option<PathBuf>`: handle `~` (home dir), `$CWD` (cage invocation dir), `$VAR` (env lookup)
-- [ ] Apply to all `Vec<PathBuf>` fields during policy resolution (not at parse time, so `$CWD` is the runtime invocation dir)
-- [ ] Drop path entry silently if referenced `$VAR` is unset; log at `-v` level
+- [x] `expand_path(template: &str, cwd: &Path) -> Option<PathBuf>`: handle `~` (home dir), `$CWD` (cage invocation dir), `$VAR` (env lookup)
+- [x] Apply to all `Vec<PathBuf>` fields during policy resolution (not at parse time, so `$CWD` is the runtime invocation dir)
+- [x] Drop path entry silently if referenced `$VAR` is unset; log at `-v` level
 
 ### T1.6 — Session temp dir (`src/main.rs`)
 - [ ] Create `/tmp/cage-{PID}-{RAND}/` (Linux/macOS) or `%TEMP%\cage-{PID}-{RAND}\` (Windows) before sandbox setup

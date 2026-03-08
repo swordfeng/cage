@@ -27,8 +27,8 @@ fn run(args: cli::Args) -> anyhow::Result<()> {
     // Resolve the policy name first (for verbose output)
     let policy_name = merged_config.resolve_policy_name(&args)?;
 
-    // Resolve the policy (applies CLI overrides)
-    let policy = merged_config.resolve_policy(&args)?;
+    // Resolve the policy (applies CLI overrides and variable expansion)
+    let policy = merged_config.resolve_policy(&args, args.verbose)?;
 
     // Handle verbose output
     if args.verbose {
