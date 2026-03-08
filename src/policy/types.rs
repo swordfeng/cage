@@ -213,7 +213,14 @@ pub struct Config {
 mod tests {
     use super::*;
 
-    const BUNDLED_CONFIG: &str = include_str!("../../config/cage.toml");
+    #[cfg(target_os = "linux")]
+    const BUNDLED_CONFIG: &str = include_str!("../../config/cage-linux.toml");
+
+    #[cfg(target_os = "macos")]
+    const BUNDLED_CONFIG: &str = include_str!("../../config/cage-macos.toml");
+
+    #[cfg(target_os = "windows")]
+    const BUNDLED_CONFIG: &str = include_str!("../../config/cage-windows.toml");
 
     #[test]
     fn test_bundled_config_parses() {

@@ -1,4 +1,4 @@
-# Default bundled configuration for cage
+# Default bundled configuration for cage (Linux)
 # This is embedded in the binary via include_str!
 
 [policies.default]
@@ -6,6 +6,8 @@ writable_roots = ["$CWD"]
 write_restricted_paths = ["$CWD/.git", "$CWD/.env"]
 read_restricted_paths = ["~/.ssh", "~/.aws", "~/.gnupg"]
 network = "full"
+enable_gui = true
+enable_audio = true
 
 [policies.default.env]
 mode = "blocklist"
@@ -17,6 +19,8 @@ writable_roots = ["$CWD"]
 write_restricted_paths = ["$CWD/.git", "$CWD/.env"]
 read_restricted_paths = ["~/.ssh", "~/.aws", "~/.config", "~/.gnupg"]
 network = "none"
+enable_gui = false
+enable_audio = false
 
 [policies.strict.env]
 mode = "allowlist"
@@ -39,8 +43,5 @@ policy = "default"
 pattern = "aider"
 policy = "strict"
 
-[platform.linux]
-fail_on_sandbox_error = true
-
-[platform.macos]
+[platform]
 fail_on_sandbox_error = true

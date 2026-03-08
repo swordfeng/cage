@@ -230,14 +230,9 @@ policy = "strict"
 
 #### Platform-specific overrides
 ```toml
-[platform.linux]
-fail_on_sandbox_error = true
-
-[platform.macos]
-fail_on_sandbox_error = true    # set false to warn-and-continue if Seatbelt profile breaks
-
-[platform.windows]
-cage_group = "CageUsers"
+[platform]
+fail_on_sandbox_error = true    # Linux/macOS: set false to warn-and-continue if sandbox breaks
+cage_group = "CageUsers"        # Windows only: ignored on other platforms
 ```
 
 ### 4.2 Policy merge semantics (Phase 2)

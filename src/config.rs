@@ -6,7 +6,14 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const BUNDLED_CONFIG: &str = include_str!("../config/cage.toml");
+#[cfg(target_os = "linux")]
+const BUNDLED_CONFIG: &str = include_str!("../config/cage-linux.toml");
+
+#[cfg(target_os = "macos")]
+const BUNDLED_CONFIG: &str = include_str!("../config/cage-macos.toml");
+
+#[cfg(target_os = "windows")]
+const BUNDLED_CONFIG: &str = include_str!("../config/cage-windows.toml");
 
 /// Loads and merges configuration from multiple sources:
 /// 1. User config (~/.config/cage/cage.toml) - created from bundled if missing
