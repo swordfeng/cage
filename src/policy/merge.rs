@@ -534,10 +534,7 @@ mod tests {
         assert_eq!(expanded, std::path::Path::new("/workspace/project/src"));
 
         let expanded = expand_path("./config", cwd).unwrap();
-        assert_eq!(
-            expanded,
-            std::path::Path::new("/workspace/project/config")
-        );
+        assert_eq!(expanded, std::path::Path::new("/workspace/project/config"));
 
         // ../relative path
         let expanded = expand_path("../other", cwd).unwrap();

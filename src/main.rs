@@ -32,22 +32,96 @@ fn run(args: cli::Args) -> anyhow::Result<()> {
     // Resolve the policy (applies CLI overrides and variable expansion)
     let policy = merged_config.resolve_policy(&args, args.verbose)?;
 
+    // Create session temp directory early for verbose/dry-run display
+    let session_tmpdir = create_session_tmpdir()?;
+
+    // Register cleanup for temp directory
+    let tmpdir_path = session_tmpdir.clone();
+    defer! {
+        let _ = fs::remove_dir_all(&tmpdir_path);
+    }
+
+    // Determine platform backend
+    let platform_backend = if cfg!(target_os = "linux") {
+        "bubblewrap (Linux)"
+    } else if cfg!(target_os = "macos") {
+        "Seatbelt (macOS)"
+    } else if cfg!(target_os = "windows") {
+        "Restricted Token (Windows)"
+    } else {
+        "unknown"
+    };
+
     // Handle verbose output
     if args.verbose {
         eprintln!("Policy name: {}", policy_name);
-        eprintln!("Policy config: {:?}", policy);
+        eprintln!("Session temp dir: {}", session_tmpdir.display());
+        eprintln!("Platform backend: {}", platform_backend);
+        eprintln!("\nResolved policy:");
+        eprintln!("  Writable roots:");
+        for path in &policy.writable_roots {
+            eprintln!("    - {}", path.display());
+        }
+        eprintln!("  Write-restricted paths:");
+        for path in &policy.write_restricted_paths {
+            eprintln!("    - {}", path.display());
+        }
+        eprintln!("  Read-restricted paths:");
+        for path in &policy.read_restricted_paths {
+            eprintln!("    - {}", path.display());
+        }
+        eprintln!("  Network: {:?}", policy.network());
+        eprintln!("  Environment mode: {:?}", policy.env().mode());
     }
 
-    // Handle dry-run: print config and exit
+    // Handle dry-run: print generated command/profile and exit
     if args.dry_run {
         println!("Sandbox configuration:");
         println!("  Policy name: {}", policy_name);
+        println!("  Session temp dir: {}", session_tmpdir.display());
+        println!("  Platform backend: {}", platform_backend);
         println!("  Writable roots: {:?}", policy.writable_roots);
         println!("  Write restricted: {:?}", policy.write_restricted_paths);
         println!("  Read restricted: {:?}", policy.read_restricted_paths);
         println!("  Network: {:?}", policy.network());
         println!("  Command: {}", args.command);
         println!("  Args: {:?}", args.args);
+
+        // Show generated command/profile for the platform
+        println!("\nGenerated sandbox configuration:");
+        #[cfg(target_os = "linux")]
+        {
+            let argv = platform::linux::generate_bwrap_argv(
+                &policy,
+                &args.command,
+                &args.args,
+                &session_tmpdir,
+            );
+            println!("\nbwrap command:");
+            println!("  {}", argv.join(" "));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let profile = platform::macos::generate_seatbelt_profile(
+                &policy,
+                &args.command,
+                &args.args,
+                &session_tmpdir,
+            );
+            println!("\nSeatbelt profile:");
+            println!("{}", profile);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let config = platform::windows::generate_windows_sandbox_config(
+                &policy,
+                &args.command,
+                &args.args,
+                &session_tmpdir,
+            );
+            println!("\n{}", config);
+        }
+
         println!("\n(Dry run - not executing)");
         return Ok(());
     }
@@ -63,16 +137,6 @@ fn run(args: cli::Args) -> anyhow::Result<()> {
 
         let code = status.code().unwrap_or(1);
         process::exit(code);
-    }
-
-    // Create session temp directory
-    // TODO: T1.6 - Use proper /tmp/cage-{PID}-{RAND}/ format with cleanup
-    let session_tmpdir = create_session_tmpdir()?;
-
-    // Register cleanup for temp directory
-    let tmpdir_path = session_tmpdir.clone();
-    defer! {
-        let _ = fs::remove_dir_all(&tmpdir_path);
     }
 
     // Run command in sandbox

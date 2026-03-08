@@ -78,8 +78,8 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] If `MCP_SOCKET` is unset, skip passthrough silently
 
 ### T1.10 — `--dry-run` and `-v` output
-- [ ] `-v`: print resolved `SandboxPolicy` (formatted), temp dir path, and chosen platform backend before exec
-- [ ] `--dry-run`: also print generated bwrap argv or Seatbelt profile content; do not exec; exit 0
+- [x] `-v`: print resolved `SandboxPolicy` (formatted), temp dir path, and chosen platform backend before exec
+- [x] `--dry-run`: also print generated bwrap argv or Seatbelt profile content; do not exec; exit 0
 
 ### T1.11 — Integration tests
 - [ ] `write_restricted_paths`: attempt to write to `$CWD/.git/COMMIT_EDITMSG`; assert `PermissionDenied`
