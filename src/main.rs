@@ -11,15 +11,6 @@ mod config;
 mod platform;
 mod policy;
 
-#[cfg(target_os = "linux")]
-const BUNDLED_CONFIG: &str = include_str!("../config/cage-linux.toml");
-
-#[cfg(target_os = "macos")]
-const BUNDLED_CONFIG: &str = include_str!("../config/cage-macos.toml");
-
-#[cfg(target_os = "windows")]
-const BUNDLED_CONFIG: &str = include_str!("../config/cage-windows.toml");
-
 fn main() {
     let args = cli::Args::parse();
 
@@ -31,13 +22,13 @@ fn main() {
 
 fn run(args: cli::Args) -> anyhow::Result<()> {
     // Load and merge configuration
-    let merged_config = config::load_config(&args)?;
+    let cfg = config::load_config(&args)?;
 
     // Resolve the policy name first (for verbose output)
-    let policy_name = merged_config.resolve_policy_name(&args)?;
+    let policy_name = config::resolve_policy_name(&cfg, &args)?;
 
     // Resolve the policy (applies CLI overrides and variable expansion)
-    let policy = merged_config.resolve_policy(&args, args.verbose)?;
+    let policy = config::resolve_policy(&cfg, &args, args.verbose)?;
 
     // Create session temp directory early for verbose/dry-run display
     let session_tmpdir = create_session_tmpdir()?;
@@ -180,8 +171,10 @@ mod tests {
 
     #[test]
     fn test_bundled_config_embedded() {
-        // Verify bundled config is embedded
-        assert!(BUNDLED_CONFIG.contains("[policies.default]"));
+        // Verify bundled config is embedded by loading it
+        let args = cli::Args::parse_from(["cage", "test"]);
+        let cfg = config::load_config(&args).unwrap();
+        assert!(cfg.policies.contains_key("default"));
     }
 
     #[test]

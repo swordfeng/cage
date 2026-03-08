@@ -1,5 +1,5 @@
 use crate::cli::Args;
-use crate::policy::merge::{expand_path, glob_match};
+use crate::policy::merge::expand_path;
 use crate::policy::types::{Config, SandboxPolicy};
 use anyhow::{bail, Context, Result};
 use std::env;
@@ -7,26 +7,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
-const BUNDLED_CONFIG: &str = include_str!("../config/cage-linux.toml");
+pub const BUNDLED_CONFIG: &str = include_str!("../config/cage-linux.toml");
 
 #[cfg(target_os = "macos")]
-const BUNDLED_CONFIG: &str = include_str!("../config/cage-macos.toml");
+pub const BUNDLED_CONFIG: &str = include_str!("../config/cage-macos.toml");
 
 #[cfg(target_os = "windows")]
-const BUNDLED_CONFIG: &str = include_str!("../config/cage-windows.toml");
+pub const BUNDLED_CONFIG: &str = include_str!("../config/cage-windows.toml");
 
 /// Loads and merges configuration from multiple sources:
 /// 1. User config (~/.config/cage/cage.toml) - created from bundled if missing
 /// 2. Project config (.cage.toml, walking up from CWD)
 /// 3. CLI config file (--config)
 /// 4. CLI flag overrides (--writable, --write-restrict, etc.)
-pub fn load_config(args: &Args) -> Result<MergedConfig> {
+pub fn load_config(args: &Args) -> Result<Config> {
     load_config_internal(args, true)
 }
 
 /// Internal implementation with option to skip user config initialization.
 /// Set `initialize_user` to false in tests to avoid side effects.
-fn load_config_internal(args: &Args, initialize_user: bool) -> Result<MergedConfig> {
+fn load_config_internal(args: &Args, initialize_user: bool) -> Result<Config> {
     // Initialize user config if it doesn't exist (only in production)
     if initialize_user {
         initialize_user_config()?;
@@ -46,7 +46,7 @@ fn load_config_internal(args: &Args, initialize_user: bool) -> Result<MergedConf
         merge_config(&mut config, cli_config);
     }
 
-    Ok(MergedConfig { inner: config })
+    Ok(config)
 }
 
 /// Initialize user config directory and file if they don't exist.
@@ -98,97 +98,61 @@ fn load_user_or_bundled_config() -> Result<Config> {
     }
 }
 
-/// Configuration after all merging is complete
-pub struct MergedConfig {
-    inner: Config,
+/// Resolve the final policy name based on:
+/// 1. --policy flag (explicit user choice)
+/// 2. command_policy match (pattern-based)
+/// 3. "default" policy
+pub fn resolve_policy_name(config: &Config, args: &Args) -> Result<String> {
+    // Priority 1: --policy flag
+    if let Some(ref policy_name) = args.policy {
+        // Validate the policy exists
+        if !config.policies.contains_key(policy_name) {
+            bail!("policy '{}' not found", policy_name);
+        }
+        return Ok(policy_name.clone());
+    }
+
+    // Priority 2: command_policy match
+    if let Some(policy_name) = config.default_policy_for(&args.command) {
+        return Ok(policy_name.to_string());
+    }
+
+    // Priority 3: "default" policy
+    if config.policies.contains_key("default") {
+        return Ok("default".to_string());
+    }
+
+    bail!("no policy specified and no 'default' policy found")
 }
 
-impl MergedConfig {
-    /// Get a policy by name
-    pub fn get_policy(&self, name: &str) -> Result<&SandboxPolicy> {
-        self.inner
-            .policies
-            .get(name)
-            .with_context(|| format!("policy '{}' not found", name))
+/// Resolve the final policy, applying CLI overrides and variable expansion.
+/// This is the primary API for callers that need a ready-to-use policy.
+pub fn resolve_policy(config: &Config, args: &Args, verbose: bool) -> Result<SandboxPolicy> {
+    let name = resolve_policy_name(config, args)?;
+    let mut policy = config.get_policy(&name)?.clone();
+
+    // Apply CLI path overrides to the resolved policy
+    policy.writable_roots.extend(args.writable.iter().cloned());
+    policy
+        .write_restricted_paths
+        .extend(args.write_restrict.iter().cloned());
+    policy
+        .read_restricted_paths
+        .extend(args.read_restrict.iter().cloned());
+
+    if args.allow_network {
+        policy.network = Some(crate::policy::types::NetworkPolicy::Full);
     }
 
-    /// Resolve the final policy, applying CLI overrides and variable expansion.
-    /// This is the primary API for callers that need a ready-to-use policy.
-    pub fn resolve_policy(&self, args: &Args, verbose: bool) -> Result<SandboxPolicy> {
-        let name = self.resolve_policy_name(args)?;
-        let mut policy = self.get_policy(&name)?.clone();
+    // Get the current working directory for $CWD expansion
+    let cwd = env::current_dir().context("failed to get current working directory")?;
 
-        // Apply CLI path overrides to the resolved policy
-        policy.writable_roots.extend(args.writable.iter().cloned());
-        policy
-            .write_restricted_paths
-            .extend(args.write_restrict.iter().cloned());
-        policy
-            .read_restricted_paths
-            .extend(args.read_restrict.iter().cloned());
+    // Expand variables in all path fields
+    policy.writable_roots = expand_paths(&policy.writable_roots, &cwd, verbose);
+    policy.write_restricted_paths = expand_paths(&policy.write_restricted_paths, &cwd, verbose);
+    policy.read_restricted_paths = expand_paths(&policy.read_restricted_paths, &cwd, verbose);
 
-        if args.allow_network {
-            policy.network = Some(crate::policy::types::NetworkPolicy::Full);
-        }
-
-        // Get the current working directory for $CWD expansion
-        let cwd = env::current_dir().context("failed to get current working directory")?;
-
-        // Expand variables in all path fields
-        policy.writable_roots = expand_paths(&policy.writable_roots, &cwd, verbose);
-        policy.write_restricted_paths = expand_paths(&policy.write_restricted_paths, &cwd, verbose);
-        policy.read_restricted_paths = expand_paths(&policy.read_restricted_paths, &cwd, verbose);
-
-        Ok(policy)
-    }
-
-    /// Find the default policy for a command using command_policy matching
-    pub fn default_policy_for(&self, command: &str) -> Option<&str> {
-        let command_name = Path::new(command)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(command);
-
-        for cmd_policy in &self.inner.command_policy {
-            if glob_match(&cmd_policy.pattern, command_name) {
-                return Some(&cmd_policy.policy);
-            }
-        }
-
-        None
-    }
-
-    /// Resolve the final policy name based on:
-    /// 1. --policy flag (explicit user choice)
-    /// 2. command_policy match (pattern-based)
-    /// 3. "default" policy
-    pub fn resolve_policy_name(&self, args: &Args) -> Result<String> {
-        // Priority 1: --policy flag
-        if let Some(ref policy_name) = args.policy {
-            // Validate the policy exists
-            if !self.inner.policies.contains_key(policy_name) {
-                bail!("policy '{}' not found", policy_name);
-            }
-            return Ok(policy_name.clone());
-        }
-
-        // Priority 2: command_policy match
-        if let Some(policy_name) = self.default_policy_for(&args.command) {
-            return Ok(policy_name.to_string());
-        }
-
-        // Priority 3: "default" policy
-        if self.inner.policies.contains_key("default") {
-            return Ok("default".to_string());
-        }
-
-        bail!("no policy specified and no 'default' policy found")
-    }
-
-    /// Get the underlying config (for tests/debugging)
-    pub fn config(&self) -> &Config {
-        &self.inner
-    }
+    Ok(policy)
 }
 
 /// Expand variables in a list of paths.
@@ -246,7 +210,7 @@ fn find_and_load_project_config() -> Result<Option<Config>> {
 /// - Network: Override (last wins)
 /// - Env: Deep merge
 ///   - mode: Override
-///   - allow/block lists: Union
+///   - filters: Prepend (higher layer takes precedence)
 ///   - set: Merge maps (later values win)
 fn merge_config(base: &mut Config, other: Config) {
     // Merge policies: merge fields for same policy names
@@ -289,7 +253,7 @@ mod tests {
     }
 
     /// Load config for tests without initializing user config (to avoid side effects)
-    fn load_test_config(args: &Args) -> Result<MergedConfig> {
+    fn load_test_config(args: &Args) -> Result<Config> {
         load_config_internal(args, false)
     }
 
@@ -301,7 +265,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy_name = config.resolve_policy_name(&args).unwrap();
+        let policy_name = resolve_policy_name(&config, &args).unwrap();
         assert_eq!(policy_name, "strict".to_string());
     }
 
@@ -310,7 +274,7 @@ mod tests {
         // "opencode" should match the default policy per bundled config
         let args = create_test_args("opencode");
         let config = load_test_config(&args).unwrap();
-        let policy_name = config.resolve_policy_name(&args).unwrap();
+        let policy_name = resolve_policy_name(&config, &args).unwrap();
         assert_eq!(policy_name, "default".to_string());
     }
 
@@ -319,7 +283,7 @@ mod tests {
         // "aider" should match "strict" policy per bundled config
         let args = create_test_args("aider");
         let config = load_test_config(&args).unwrap();
-        let policy_name = config.resolve_policy_name(&args).unwrap();
+        let policy_name = resolve_policy_name(&config, &args).unwrap();
         assert_eq!(policy_name, "strict".to_string());
     }
 
@@ -328,7 +292,7 @@ mod tests {
         // Unknown command should fall back to "default"
         let args = create_test_args("unknown-cmd");
         let config = load_test_config(&args).unwrap();
-        let policy_name = config.resolve_policy_name(&args).unwrap();
+        let policy_name = resolve_policy_name(&config, &args).unwrap();
         assert_eq!(policy_name, "default".to_string());
     }
 
@@ -341,7 +305,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let result = config.resolve_policy_name(&args);
+        let result = resolve_policy_name(&config, &args);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -364,7 +328,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = config.resolve_policy(&args, false).unwrap();
+        let policy = resolve_policy(&config, &args, false).unwrap();
 
         // Should include the extra writable path
         assert!(policy
@@ -384,7 +348,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = config.resolve_policy(&args, false).unwrap();
+        let policy = resolve_policy(&config, &args, false).unwrap();
 
         // allow_network should override to Full
         assert!(matches!(policy.network, Some(NetworkPolicy::Full)));
@@ -399,7 +363,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = config.resolve_policy(&args, false).unwrap();
+        let policy = resolve_policy(&config, &args, false).unwrap();
 
         assert!(policy
             .writable_roots
@@ -419,7 +383,6 @@ mod tests {
         assert!(config.get_policy("strict").is_ok());
 
         // Should have command_policy entries
-        let cfg = config.config();
-        assert!(!cfg.command_policy.is_empty());
+        assert!(!config.command_policy.is_empty());
     }
 }

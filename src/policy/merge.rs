@@ -1,4 +1,4 @@
-use crate::policy::types::{EnvMode, EnvPolicy};
+use crate::policy::types::{EnvMode, EnvPolicy, FilterAction};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -106,24 +106,43 @@ fn lookup_var(name: &str, cwd: &std::path::Path) -> Option<String> {
 }
 
 impl EnvPolicy {
+    /// Filter environment variables based on ordered filter list.
+    ///
+    /// For each env var, go through filters in order:
+    /// - If a filter pattern matches, follow its action (Allow/Block)
+    /// - If no filter matches, use the default mode (Allowlist=deny, Blocklist=allow)
+    ///
+    /// Finally, apply `set` overrides on top.
     pub fn filter(&self, env: &HashMap<String, String>) -> HashMap<String, String> {
         let mut result = HashMap::new();
 
-        match self.mode() {
-            EnvMode::Allowlist => {
-                // Only allow vars matching any pattern in self.allow
-                for (key, value) in env {
-                    if self.allow.iter().any(|pattern| glob_match(pattern, key)) {
-                        result.insert(key.clone(), value.clone());
-                    }
+        for (key, value) in env {
+            // Check filters in order - first match wins
+            let mut matched = false;
+            let mut should_allow = false;
+
+            for filter in &self.filters {
+                if glob_match(&filter.pattern, key) {
+                    matched = true;
+                    should_allow = matches!(filter.action, FilterAction::Allow);
+                    break;
                 }
             }
-            EnvMode::Blocklist => {
-                // Allow all vars except those matching any pattern in self.block
-                for (key, value) in env {
-                    if !self.block.iter().any(|pattern| glob_match(pattern, key)) {
-                        result.insert(key.clone(), value.clone());
-                    }
+
+            if matched {
+                // Follow the filter's action
+                if should_allow {
+                    result.insert(key.clone(), value.clone());
+                }
+                // If blocked, don't add to result
+            } else {
+                // No filter matched, use default mode
+                let should_include = match self.mode() {
+                    EnvMode::Allowlist => false, // Deny by default in allowlist mode
+                    EnvMode::Blocklist => true,  // Allow by default in blocklist mode
+                };
+                if should_include {
+                    result.insert(key.clone(), value.clone());
                 }
             }
         }
@@ -233,12 +252,14 @@ mod tests {
         .into_iter()
         .collect();
 
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Allowlist),
-            allow: vec!["PATH".to_string()],
-            block: vec![],
-            set: HashMap::new(),
-        };
+        // Parse from TOML to get proper filter ordering
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "allowlist"
+allow = ["PATH"]
+"#,
+        )
+        .unwrap();
 
         let filtered = policy.filter(&env);
         assert_eq!(filtered.len(), 1);
@@ -258,12 +279,14 @@ mod tests {
         .into_iter()
         .collect();
 
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Blocklist),
-            allow: vec![],
-            block: vec!["*_TOKEN".to_string(), "*KEY".to_string()],
-            set: HashMap::new(),
-        };
+        // Parse from TOML to get proper filter ordering
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "blocklist"
+block = ["*_TOKEN", "*KEY"]
+"#,
+        )
+        .unwrap();
 
         let filtered = policy.filter(&env);
         assert_eq!(filtered.len(), 1);
@@ -279,16 +302,15 @@ mod tests {
             .into_iter()
             .collect();
 
-        let mut set = HashMap::new();
-        set.insert("PATH".to_string(), "/new".to_string());
-        set.insert("CAGE".to_string(), "1".to_string());
-
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Allowlist),
-            allow: vec!["PATH".to_string()],
-            block: vec![],
-            set,
-        };
+        // Parse from TOML
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "allowlist"
+allow = ["PATH"]
+set = { PATH = "/new", CAGE = "1" }
+"#,
+        )
+        .unwrap();
 
         let filtered = policy.filter(&env);
         assert_eq!(filtered.get("PATH"), Some(&"/new".to_string()));
@@ -304,15 +326,15 @@ mod tests {
         .into_iter()
         .collect();
 
-        let mut set = HashMap::new();
-        set.insert("CAGE".to_string(), "1".to_string());
-
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Blocklist),
-            allow: vec![],
-            block: vec!["SECRET".to_string()],
-            set,
-        };
+        // Parse from TOML
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "blocklist"
+block = ["SECRET"]
+set = { CAGE = "1" }
+"#,
+        )
+        .unwrap();
 
         let filtered = policy.filter(&env);
         assert!(filtered.contains_key("PATH"));
@@ -334,22 +356,15 @@ mod tests {
         .into_iter()
         .collect();
 
-        let mut set = HashMap::new();
-        set.insert("CAGE".to_string(), "1".to_string());
-
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Blocklist),
-            allow: vec![],
-            block: vec![
-                "*_TOKEN".to_string(),
-                "*_SECRET".to_string(),
-                "*_PASSWORD".to_string(),
-                "*_API_KEY".to_string(),
-                "AWS_*".to_string(),
-                "GITHUB_*".to_string(),
-            ],
-            set,
-        };
+        // Parse from TOML to get proper filter ordering
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "blocklist"
+block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "AWS_*", "GITHUB_*"]
+set = { CAGE = "1" }
+"#,
+        )
+        .unwrap();
 
         let filtered = policy.filter(&env);
         assert!(filtered.contains_key("PATH"));
@@ -372,15 +387,15 @@ mod tests {
         .into_iter()
         .collect();
 
-        let mut set = HashMap::new();
-        set.insert("CAGE".to_string(), "1".to_string());
-
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Allowlist),
-            allow: vec!["PATH".to_string()],
-            block: vec![],
-            set,
-        };
+        // Parse from TOML to get proper filter ordering
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "allowlist"
+allow = ["PATH"]
+set = { CAGE = "1" }
+"#,
+        )
+        .unwrap();
 
         let filtered = policy.filter(&env);
         assert_eq!(filtered.len(), 2); // PATH + CAGE
@@ -388,6 +403,59 @@ mod tests {
         assert!(!filtered.contains_key("HOME"));
         assert!(!filtered.contains_key("SECRET"));
         assert_eq!(filtered.get("CAGE"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn test_env_filter_first_match_wins() {
+        // Test that first matching filter wins
+        let env: HashMap<String, String> = [("MY_TOKEN".to_string(), "secret".to_string())]
+            .into_iter()
+            .collect();
+
+        // With allowlist mode and filters: block *_TOKEN, allow MY_TOKEN
+        // The block filter comes first (in TOML, block patterns are before allow)
+        // So MY_TOKEN should be blocked
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "allowlist"
+block = ["*_TOKEN"]
+allow = ["MY_TOKEN"]
+"#,
+        )
+        .unwrap();
+
+        let filtered = policy.filter(&env);
+        // block filter comes before allow filter in the list
+        // So *_TOKEN matches first and blocks it
+        assert!(!filtered.contains_key("MY_TOKEN"));
+    }
+
+    #[test]
+    fn test_env_filter_allow_before_block() {
+        // If we manually construct policy with allow before block
+        // (which wouldn't happen from TOML parsing, but test the logic)
+        let env: HashMap<String, String> = [("MY_TOKEN".to_string(), "secret".to_string())]
+            .into_iter()
+            .collect();
+
+        let policy = EnvPolicy {
+            mode: Some(EnvMode::Allowlist),
+            filters: vec![
+                crate::policy::types::EnvFilter {
+                    pattern: "MY_TOKEN".to_string(),
+                    action: FilterAction::Allow,
+                },
+                crate::policy::types::EnvFilter {
+                    pattern: "*_TOKEN".to_string(),
+                    action: FilterAction::Block,
+                },
+            ],
+            set: HashMap::new(),
+        };
+
+        let filtered = policy.filter(&env);
+        // MY_TOKEN matches first (allow), so it should be allowed
+        assert!(filtered.contains_key("MY_TOKEN"));
     }
 
     #[test]

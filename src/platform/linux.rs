@@ -1,4 +1,4 @@
-use crate::policy::types::{EnvMode, EnvPolicy, NetworkPolicy, SandboxPolicy};
+use crate::policy::types::{EnvPolicy, NetworkPolicy, SandboxPolicy};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -69,47 +69,11 @@ fn check_bwrap_prerequisites() -> Result<()> {
 
 /// Filter environment variables based on policy
 fn filter_environment(env_policy: &EnvPolicy) -> HashMap<String, String> {
-    let mut result = HashMap::new();
+    // Build HashMap from current environment
+    let env_vars: HashMap<String, String> = std::env::vars().collect();
 
-    match env_policy.mode() {
-        EnvMode::Allowlist => {
-            // Only include vars matching allow patterns
-            for (key, value) in std::env::vars() {
-                let mut allowed = false;
-                for pattern in &env_policy.allow {
-                    if glob_match(pattern, &key) {
-                        allowed = true;
-                        break;
-                    }
-                }
-                if allowed {
-                    result.insert(key, value);
-                }
-            }
-        }
-        EnvMode::Blocklist => {
-            // Include all vars except those matching block patterns
-            for (key, value) in std::env::vars() {
-                let mut blocked = false;
-                for pattern in &env_policy.block {
-                    if glob_match(pattern, &key) {
-                        blocked = true;
-                        break;
-                    }
-                }
-                if !blocked {
-                    result.insert(key, value);
-                }
-            }
-        }
-    }
-
-    // Apply forced overrides from env.set
-    for (key, value) in &env_policy.set {
-        result.insert(key.clone(), value.clone());
-    }
-
-    result
+    // Use the shared filter implementation from merge module
+    env_policy.filter(&env_vars)
 }
 
 /// Simple glob matching supporting * and ? only
@@ -318,14 +282,15 @@ mod tests {
             std::env::set_var("CAGE_TEST_SECRET", "secret123");
         }
 
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Allowlist),
-            allow: vec!["CAGE_TEST_PATH".to_string(), "CAGE_TEST_H*".to_string()],
-            block: vec![],
-            set: [("CAGE_TEST_EXTRA".to_string(), "extra_value".to_string())]
-                .into_iter()
-                .collect(),
-        };
+        // Parse policy from TOML to get proper filter ordering
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "allowlist"
+allow = ["CAGE_TEST_PATH", "CAGE_TEST_H*"]
+set = { CAGE_TEST_EXTRA = "extra_value" }
+"#,
+        )
+        .unwrap();
 
         let filtered = filter_environment(&policy);
 
@@ -351,12 +316,14 @@ mod tests {
             std::env::set_var("CAGE_TEST_NORMAL", "normal_value");
         }
 
-        let policy = EnvPolicy {
-            mode: Some(EnvMode::Blocklist),
-            allow: vec![],
-            block: vec!["*_TOKEN".to_string()],
-            set: vec![].into_iter().collect(),
-        };
+        // Parse policy from TOML to get proper filter ordering
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "blocklist"
+block = ["*_TOKEN"]
+"#,
+        )
+        .unwrap();
 
         let filtered = filter_environment(&policy);
 

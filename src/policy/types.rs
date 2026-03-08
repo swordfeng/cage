@@ -68,8 +68,7 @@ impl SandboxPolicy {
         self.env.as_ref().unwrap_or_else(|| {
             DEFAULT_ENV.get_or_init(|| EnvPolicy {
                 mode: Some(EnvMode::Blocklist),
-                allow: Vec::new(),
-                block: Vec::new(),
+                filters: Vec::new(),
                 set: HashMap::new(),
             })
         })
@@ -91,33 +90,93 @@ pub enum EnvMode {
     Blocklist,
 }
 
+/// A single environment variable filter with pattern and action
 #[derive(Debug, Clone, Deserialize)]
+pub struct EnvFilter {
+    pub pattern: String,
+    pub action: FilterAction,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterAction {
+    Allow,
+    Block,
+}
+
+/// Intermediate representation for deserializing env policy from TOML
+/// Block patterns come before allow patterns in the filter list
+#[derive(Debug, Clone, Deserialize)]
+struct EnvPolicyRaw {
+    #[serde(default)]
+    mode: Option<EnvMode>,
+    #[serde(default)]
+    allow: Vec<String>,
+    #[serde(default)]
+    block: Vec<String>,
+    #[serde(default)]
+    set: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct EnvPolicy {
-    /// Environment filter mode - if None, use base value during merge
+    /// Environment filter mode - default action when no filter matches
     pub(crate) mode: Option<EnvMode>,
-    #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub block: Vec<String>,
-    #[serde(default)]
-    pub set: HashMap<String, String>,
+    /// Ordered list of filters: block patterns come before allow patterns within one file
+    /// When merging, upper layer filters are prepended to lower layer filters
+    pub(crate) filters: Vec<EnvFilter>,
+    /// Forced overrides, always applied after filtering
+    pub(crate) set: HashMap<String, String>,
 }
 
 impl Default for EnvPolicy {
     fn default() -> Self {
         Self {
             mode: None,
-            allow: Vec::new(),
-            block: Vec::new(),
+            filters: Vec::new(),
             set: HashMap::new(),
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for EnvPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = EnvPolicyRaw::deserialize(deserializer)?;
+
+        // Build filters list: block patterns first, then allow patterns
+        let mut filters = Vec::new();
+
+        // Add block filters first
+        for pattern in raw.block {
+            filters.push(EnvFilter {
+                pattern,
+                action: FilterAction::Block,
+            });
+        }
+
+        // Add allow filters after block filters
+        for pattern in raw.allow {
+            filters.push(EnvFilter {
+                pattern,
+                action: FilterAction::Allow,
+            });
+        }
+
+        Ok(EnvPolicy {
+            mode: raw.mode,
+            filters,
+            set: raw.set,
+        })
     }
 }
 
 impl EnvPolicy {
     /// Merge another env policy into this one.
     /// - mode: Override only if other is Some
-    /// - allow/block lists: Union (extend)
+    /// - filters: Prepend other's filters (upper layer takes precedence)
     /// - set: Merge maps (other values win on conflict)
     pub fn merge(&mut self, other: &Self) {
         // Mode: override only if explicitly set
@@ -125,9 +184,11 @@ impl EnvPolicy {
             self.mode = Some(mode.clone());
         }
 
-        // Allow/block lists: union (always, since missing = empty via default)
-        self.allow.extend(other.allow.iter().cloned());
-        self.block.extend(other.block.iter().cloned());
+        // Filters: prepend other's filters (upper layer takes precedence)
+        // Other's filters are checked first, then our existing filters
+        let mut new_filters = other.filters.clone();
+        new_filters.extend(self.filters.iter().cloned());
+        self.filters = new_filters;
 
         // Set: merge maps, other wins on conflict
         for (key, value) in &other.set {
@@ -209,22 +270,41 @@ pub struct Config {
     pub platform: PlatformConfig,
 }
 
+impl Config {
+    /// Get a policy by name
+    pub fn get_policy(&self, name: &str) -> anyhow::Result<&SandboxPolicy> {
+        self.policies
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("policy '{}' not found", name))
+    }
+
+    /// Find the default policy for a command using command_policy matching
+    pub fn default_policy_for(&self, command: &str) -> Option<&str> {
+        use crate::policy::merge::glob_match;
+
+        let command_name = std::path::Path::new(command)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(command);
+
+        for cmd_policy in &self.command_policy {
+            if glob_match(&cmd_policy.pattern, command_name) {
+                return Some(&cmd_policy.policy);
+            }
+        }
+
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(target_os = "linux")]
-    const BUNDLED_CONFIG: &str = include_str!("../../config/cage-linux.toml");
-
-    #[cfg(target_os = "macos")]
-    const BUNDLED_CONFIG: &str = include_str!("../../config/cage-macos.toml");
-
-    #[cfg(target_os = "windows")]
-    const BUNDLED_CONFIG: &str = include_str!("../../config/cage-windows.toml");
-
     #[test]
     fn test_bundled_config_parses() {
-        let config: Config = toml::from_str(BUNDLED_CONFIG).expect("bundled config should parse");
+        let config: Config =
+            toml::from_str(crate::config::BUNDLED_CONFIG).expect("bundled config should parse");
         assert!(config.policies.contains_key("default"));
         assert!(config.policies.contains_key("strict"));
         assert_eq!(config.command_policy.len(), 4);
@@ -248,7 +328,7 @@ mod tests {
     #[test]
     fn test_default_policy_values() {
         // Verify the default policy has expected values
-        let config: Config = toml::from_str(BUNDLED_CONFIG).unwrap();
+        let config: Config = toml::from_str(crate::config::BUNDLED_CONFIG).unwrap();
         let default = config.policies.get("default").unwrap();
         assert!(matches!(default.network, Some(NetworkPolicy::Full)));
 
@@ -258,37 +338,44 @@ mod tests {
 
     #[test]
     fn test_env_policy_merge() {
-        let mut base = EnvPolicy {
-            mode: Some(EnvMode::Blocklist),
-            allow: vec!["PATH".to_string()],
-            block: vec!["SECRET".to_string()],
-            set: [("BASE".to_string(), "1".to_string())]
-                .into_iter()
-                .collect(),
-        };
+        // Base policy: block SECRET, allow PATH
+        let mut base: EnvPolicy = toml::from_str(
+            r#"
+mode = "blocklist"
+block = ["SECRET"]
+allow = ["PATH"]
+set = { BASE = "1" }
+"#,
+        )
+        .unwrap();
 
-        let other = EnvPolicy {
-            mode: Some(EnvMode::Allowlist),
-            allow: vec!["HOME".to_string()],
-            block: vec!["TOKEN".to_string()],
-            set: [
-                ("OTHER".to_string(), "2".to_string()),
-                ("BASE".to_string(), "overridden".to_string()),
-            ]
-            .into_iter()
-            .collect(),
-        };
+        // Other policy: block TOKEN, allow HOME
+        let other: EnvPolicy = toml::from_str(
+            r#"
+mode = "allowlist"
+block = ["TOKEN"]
+allow = ["HOME"]
+set = { OTHER = "2", BASE = "overridden" }
+"#,
+        )
+        .unwrap();
 
         base.merge(&other);
 
-        // Mode should be overridden
+        // Mode should be overridden to allowlist
         assert!(matches!(base.mode, Some(EnvMode::Allowlist)));
 
-        // Lists should be unioned
-        assert!(base.allow.contains(&"PATH".to_string()));
-        assert!(base.allow.contains(&"HOME".to_string()));
-        assert!(base.block.contains(&"SECRET".to_string()));
-        assert!(base.block.contains(&"TOKEN".to_string()));
+        // Filters should be prepended: other.filters come first, then base.filters
+        // So: TOKEN(block), HOME(allow), SECRET(block), PATH(allow)
+        assert_eq!(base.filters.len(), 4);
+        assert_eq!(base.filters[0].pattern, "TOKEN");
+        assert!(matches!(base.filters[0].action, FilterAction::Block));
+        assert_eq!(base.filters[1].pattern, "HOME");
+        assert!(matches!(base.filters[1].action, FilterAction::Allow));
+        assert_eq!(base.filters[2].pattern, "SECRET");
+        assert!(matches!(base.filters[2].action, FilterAction::Block));
+        assert_eq!(base.filters[3].pattern, "PATH");
+        assert!(matches!(base.filters[3].action, FilterAction::Allow));
 
         // Set should be merged, other wins on conflict
         assert_eq!(base.set.get("BASE"), Some(&"overridden".to_string()));
@@ -298,27 +385,57 @@ mod tests {
     #[test]
     fn test_env_policy_merge_preserves_base_mode() {
         // If other doesn't set mode, base mode should be preserved
-        let mut base = EnvPolicy {
-            mode: Some(EnvMode::Allowlist),
-            allow: vec!["PATH".to_string()],
-            block: vec![],
-            set: HashMap::new(),
-        };
+        let mut base: EnvPolicy = toml::from_str(
+            r#"
+mode = "allowlist"
+allow = ["PATH"]
+"#,
+        )
+        .unwrap();
 
-        let other = EnvPolicy {
-            mode: None, // Not set
-            allow: vec!["HOME".to_string()],
-            block: vec![],
-            set: HashMap::new(),
-        };
+        let other: EnvPolicy = toml::from_str(
+            r#"
+allow = ["HOME"]
+"#,
+        )
+        .unwrap();
 
         base.merge(&other);
 
         // Mode should still be Allowlist from base
         assert!(matches!(base.mode, Some(EnvMode::Allowlist)));
-        // But allow list should be merged
-        assert!(base.allow.contains(&"PATH".to_string()));
-        assert!(base.allow.contains(&"HOME".to_string()));
+        // Filters should be prepended: HOME, PATH
+        assert_eq!(base.filters.len(), 2);
+        assert_eq!(base.filters[0].pattern, "HOME");
+        assert_eq!(base.filters[1].pattern, "PATH");
+    }
+
+    #[test]
+    fn test_env_policy_parsing() {
+        let policy: EnvPolicy = toml::from_str(
+            r#"
+mode = "blocklist"
+block = ["*_TOKEN", "SECRET"]
+allow = ["PATH", "HOME"]
+set = { CAGE = "1" }
+"#,
+        )
+        .unwrap();
+
+        assert!(matches!(policy.mode, Some(EnvMode::Blocklist)));
+        assert_eq!(policy.filters.len(), 4);
+        // Block patterns come first
+        assert_eq!(policy.filters[0].pattern, "*_TOKEN");
+        assert!(matches!(policy.filters[0].action, FilterAction::Block));
+        assert_eq!(policy.filters[1].pattern, "SECRET");
+        assert!(matches!(policy.filters[1].action, FilterAction::Block));
+        // Then allow patterns
+        assert_eq!(policy.filters[2].pattern, "PATH");
+        assert!(matches!(policy.filters[2].action, FilterAction::Allow));
+        assert_eq!(policy.filters[3].pattern, "HOME");
+        assert!(matches!(policy.filters[3].action, FilterAction::Allow));
+        // Set
+        assert_eq!(policy.set.get("CAGE"), Some(&"1".to_string()));
     }
 
     #[test]
@@ -328,12 +445,15 @@ mod tests {
             write_restricted_paths: vec![PathBuf::from("/base/.git")],
             read_restricted_paths: vec![PathBuf::from("/secret")],
             network: Some(NetworkPolicy::None),
-            env: Some(EnvPolicy {
-                mode: Some(EnvMode::Blocklist),
-                allow: vec![],
-                block: vec!["OLD".to_string()],
-                set: HashMap::new(),
-            }),
+            env: Some(
+                toml::from_str::<EnvPolicy>(
+                    r#"
+mode = "blocklist"
+block = ["OLD"]
+"#,
+                )
+                .unwrap(),
+            ),
         };
 
         let other = SandboxPolicy {
@@ -341,14 +461,17 @@ mod tests {
             write_restricted_paths: vec![PathBuf::from("/other/.env")],
             read_restricted_paths: vec![PathBuf::from("/other/secret")],
             network: Some(NetworkPolicy::Full),
-            env: Some(EnvPolicy {
-                mode: Some(EnvMode::Allowlist),
-                allow: vec!["PATH".to_string()],
-                block: vec!["NEW".to_string()],
-                set: [("KEY".to_string(), "value".to_string())]
-                    .into_iter()
-                    .collect(),
-            }),
+            env: Some(
+                toml::from_str::<EnvPolicy>(
+                    r#"
+mode = "allowlist"
+allow = ["PATH"]
+block = ["NEW"]
+set = { KEY = "value" }
+"#,
+                )
+                .unwrap(),
+            ),
         };
 
         base.merge(&other);
@@ -367,8 +490,11 @@ mod tests {
         // Env should be deep merged
         let env = base.env.as_ref().unwrap();
         assert!(matches!(env.mode, Some(EnvMode::Allowlist)));
-        assert!(env.block.contains(&"OLD".to_string()));
-        assert!(env.block.contains(&"NEW".to_string()));
+        // Filters should be prepended: NEW(block), PATH(allow), OLD(block)
+        assert_eq!(env.filters.len(), 3);
+        assert_eq!(env.filters[0].pattern, "NEW");
+        assert_eq!(env.filters[1].pattern, "PATH");
+        assert_eq!(env.filters[2].pattern, "OLD");
     }
 
     #[test]
@@ -405,12 +531,15 @@ mod tests {
             write_restricted_paths: vec![],
             read_restricted_paths: vec![],
             network: Some(NetworkPolicy::Full),
-            env: Some(EnvPolicy {
-                mode: Some(EnvMode::Blocklist),
-                allow: vec!["PATH".to_string()],
-                block: vec![],
-                set: HashMap::new(),
-            }),
+            env: Some(
+                toml::from_str::<EnvPolicy>(
+                    r#"
+mode = "blocklist"
+allow = ["PATH"]
+"#,
+                )
+                .unwrap(),
+            ),
         };
 
         let other = SandboxPolicy {
@@ -418,12 +547,14 @@ mod tests {
             write_restricted_paths: vec![],
             read_restricted_paths: vec![],
             network: Some(NetworkPolicy::None),
-            env: Some(EnvPolicy {
-                mode: Some(EnvMode::Allowlist),
-                allow: vec![],
-                block: vec![],
-                set: HashMap::new(),
-            }),
+            env: Some(
+                toml::from_str::<EnvPolicy>(
+                    r#"
+mode = "allowlist"
+"#,
+                )
+                .unwrap(),
+            ),
         };
 
         base.merge(&other);
