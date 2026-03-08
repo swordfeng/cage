@@ -55,16 +55,32 @@ pub struct PlatformConfig {
     pub windows: WindowsPlatformConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct LinuxPlatformConfig {
     #[serde(default = "default_true")]
     pub fail_on_sandbox_error: bool,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+impl Default for LinuxPlatformConfig {
+    fn default() -> Self {
+        Self {
+            fail_on_sandbox_error: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct MacosPlatformConfig {
     #[serde(default = "default_true")]
     pub fail_on_sandbox_error: bool,
+}
+
+impl Default for MacosPlatformConfig {
+    fn default() -> Self {
+        Self {
+            fail_on_sandbox_error: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -103,6 +119,21 @@ mod tests {
         assert!(config.policies.contains_key("default"));
         assert!(config.policies.contains_key("strict"));
         assert_eq!(config.command_policy.len(), 4);
+    }
+
+    #[test]
+    fn test_platform_defaults() {
+        // Default trait must give fail_on_sandbox_error = true,
+        // matching the serde default, so missing TOML sections behave correctly.
+        let linux = LinuxPlatformConfig::default();
+        assert!(linux.fail_on_sandbox_error);
+        let macos = MacosPlatformConfig::default();
+        assert!(macos.fail_on_sandbox_error);
+
+        // PlatformConfig::default() should propagate
+        let platform = PlatformConfig::default();
+        assert!(platform.linux.fail_on_sandbox_error);
+        assert!(platform.macos.fail_on_sandbox_error);
     }
 
     #[test]

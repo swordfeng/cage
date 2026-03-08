@@ -42,43 +42,42 @@ impl EnvPolicy {
 /// Supports:
 /// - `*` - matches any sequence of characters (including empty)
 /// - `?` - matches exactly one character
+///
+/// Uses a greedy two-pointer algorithm: O(n*m) time, O(1) space.
 pub fn glob_match(pattern: &str, name: &str) -> bool {
-    let pattern_chars: Vec<char> = pattern.chars().collect();
-    let name_chars: Vec<char> = name.chars().collect();
-    let p_len = pattern_chars.len();
-    let n_len = name_chars.len();
+    let p = pattern.as_bytes();
+    let n = name.as_bytes();
+    let (plen, nlen) = (p.len(), n.len());
 
-    // dp[i][j] = true if pattern[0..i] matches name[0..j]
-    let mut dp = vec![vec![false; n_len + 1]; p_len + 1];
-    dp[0][0] = true;
+    let mut pi = 0; // pattern index
+    let mut ni = 0; // name index
+    let mut star_pi = usize::MAX; // pattern index after last '*'
+    let mut star_ni = 0; // name index when last '*' was hit
 
-    // Handle patterns like "*", "**", "*?" at the start
-    for i in 1..=p_len {
-        if pattern_chars[i - 1] == '*' {
-            dp[i][0] = dp[i - 1][0];
+    while ni < nlen {
+        if pi < plen && (p[pi] == b'?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < plen && p[pi] == b'*' {
+            star_pi = pi + 1;
+            star_ni = ni;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            // Backtrack: let the last '*' consume one more character
+            star_ni += 1;
+            pi = star_pi;
+            ni = star_ni;
+        } else {
+            return false;
         }
     }
 
-    for i in 1..=p_len {
-        for j in 1..=n_len {
-            match pattern_chars[i - 1] {
-                '*' => {
-                    // * can match empty (dp[i-1][j]) or consume one char (dp[i][j-1])
-                    dp[i][j] = dp[i - 1][j] || dp[i][j - 1];
-                }
-                '?' => {
-                    // ? matches exactly one character
-                    dp[i][j] = dp[i - 1][j - 1];
-                }
-                c => {
-                    // Exact character match
-                    dp[i][j] = dp[i - 1][j - 1] && c == name_chars[j - 1];
-                }
-            }
-        }
+    // Consume trailing '*'s in pattern
+    while pi < plen && p[pi] == b'*' {
+        pi += 1;
     }
 
-    dp[p_len][n_len]
+    pi == plen
 }
 
 #[cfg(test)]
