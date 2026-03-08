@@ -1,5 +1,7 @@
 use clap::Parser;
 use scopeguard::defer;
+use std::fs;
+use std::path::PathBuf;
 use std::process;
 
 mod cli;
@@ -19,5 +21,79 @@ fn main() {
 }
 
 fn run(args: cli::Args) -> anyhow::Result<()> {
-    todo!("T1.1 complete: Project scaffold with module structure")
+    // Load and merge configuration
+    let merged_config = config::load_config(&args)?;
+
+    // Resolve the policy name first (for verbose output)
+    let policy_name = merged_config.resolve_policy_name(&args)?;
+
+    // Resolve the policy (applies CLI overrides)
+    let policy = merged_config.resolve_policy(&args)?;
+
+    // Handle verbose output
+    if args.verbose {
+        eprintln!("Policy name: {}", policy_name);
+        eprintln!("Policy config: {:?}", policy);
+    }
+
+    // Handle dry-run: print config and exit
+    if args.dry_run {
+        println!("Sandbox configuration:");
+        println!("  Policy name: {}", policy_name);
+        println!("  Writable roots: {:?}", policy.writable_roots);
+        println!("  Write restricted: {:?}", policy.write_restricted_paths);
+        println!("  Read restricted: {:?}", policy.read_restricted_paths);
+        println!("  Network: {:?}", policy.network());
+        println!("  Command: {}", args.command);
+        println!("  Args: {:?}", args.args);
+        println!("\n(Dry run - not executing)");
+        return Ok(());
+    }
+
+    // Handle no-sandbox mode
+    if args.no_sandbox {
+        eprintln!("Warning: Running without sandbox (--no-sandbox)");
+        // Execute command directly without sandboxing
+        let status = process::Command::new(&args.command)
+            .args(&args.args)
+            .status()
+            .map_err(|e| anyhow::anyhow!("failed to execute command: {}", e))?;
+
+        let code = status.code().unwrap_or(1);
+        process::exit(code);
+    }
+
+    // Create session temp directory
+    // TODO: T1.6 - Use proper /tmp/cage-{PID}-{RAND}/ format with cleanup
+    let session_tmpdir = create_session_tmpdir()?;
+
+    // Register cleanup for temp directory
+    let tmpdir_path = session_tmpdir.clone();
+    defer! {
+        let _ = fs::remove_dir_all(&tmpdir_path);
+    }
+
+    // Run command in sandbox
+    let exit_code = platform::run_sandboxed(&policy, &args.command, &args.args, &session_tmpdir)?;
+
+    process::exit(exit_code);
+}
+
+/// Create session temp directory
+/// TODO: T1.6 - Use /tmp/cage-{PID}-{RAND}/ format
+fn create_session_tmpdir() -> anyhow::Result<PathBuf> {
+    let tmpdir = std::env::temp_dir().join(format!("cage-{}", process::id()));
+    fs::create_dir_all(&tmpdir)?;
+    Ok(tmpdir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bundled_config_embedded() {
+        // Verify bundled config is embedded
+        assert!(BUNDLED_CONFIG.contains("[policies.default]"));
+    }
 }
