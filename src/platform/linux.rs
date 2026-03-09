@@ -77,49 +77,6 @@ fn filter_environment(env_policy: &EnvPolicy) -> HashMap<String, String> {
     env_policy.filter(&env_vars)
 }
 
-/// Simple glob matching supporting * and ? only
-fn glob_match(pattern: &str, name: &str) -> bool {
-    let pattern_chars: Vec<char> = pattern.chars().collect();
-    let name_chars: Vec<char> = name.chars().collect();
-
-    fn match_recursive(p: &[char], n: &[char], pi: usize, ni: usize) -> bool {
-        let mut pi = pi;
-        let mut ni = ni;
-
-        while pi < p.len() {
-            match p[pi] {
-                '*' => {
-                    // Try matching 0 or more characters
-                    for skip in 0..=(n.len() - ni) {
-                        if match_recursive(p, n, pi + 1, ni + skip) {
-                            return true;
-                        }
-                    }
-                    return false;
-                }
-                '?' => {
-                    if ni >= n.len() {
-                        return false;
-                    }
-                    pi += 1;
-                    ni += 1;
-                }
-                c => {
-                    if ni >= n.len() || c != n[ni] {
-                        return false;
-                    }
-                    pi += 1;
-                    ni += 1;
-                }
-            }
-        }
-
-        ni == n.len()
-    }
-
-    match_recursive(&pattern_chars, &name_chars, 0, 0)
-}
-
 /// Canonicalize a path, returning None if it doesn't exist
 fn canonicalize_path(path: &Path) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(path).ok()
@@ -240,6 +197,9 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
             options.push("--unshare-net".to_string());
         }
         NetworkPolicy::Localhost => {
+            eprintln!("[cage] warning: 'localhost' network policy is not yet enforced; \
+                       sandboxed process has full network access (same as 'full'). \
+                       Seccomp-based filtering is planned for Phase 1b.");
             options.push("--share-net".to_string());
         }
         NetworkPolicy::Full => {
@@ -341,21 +301,6 @@ pub fn run_sandboxed(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_glob_match() {
-        assert!(glob_match("*", "anything"));
-        assert!(glob_match("test*", "test123"));
-        assert!(glob_match("*test", "mytest"));
-        assert!(glob_match("*test*", "mytest123"));
-        assert!(glob_match("test?", "test1"));
-        assert!(glob_match("?test", "1test"));
-        assert!(!glob_match("test?", "test"));
-        assert!(!glob_match("test?", "test12"));
-        assert!(glob_match("*_TOKEN", "API_TOKEN"));
-        assert!(glob_match("*_TOKEN", "GITHUB_TOKEN"));
-        assert!(!glob_match("*_TOKEN", "TOKEN_API"));
-    }
 
     #[test]
     fn test_filter_environment_allowlist() {

@@ -387,18 +387,19 @@ bwrap \
 
 **GUI passthrough (`enable_gui = true`):**
 
-When GUI is enabled, cage bind-mounts display server sockets and GPU device nodes into the sandbox:
-- Wayland: `--bind $XDG_RUNTIME_DIR/wayland-0 $XDG_RUNTIME_DIR/wayland-0` (if exists)
-- X11: `--ro-bind /tmp/.X11-unix /tmp/.X11-unix` (X11 UNIX domain sockets)
+When GUI is enabled, cage bind-mounts GPU device nodes into the sandbox:
 - GPU: `--dev-bind /dev/dri /dev/dri` (DRI/DRM device nodes for OpenGL/Vulkan)
 
-GUI mode also **omits `--unshare-ipc`**, which is required for X11's shared memory extension (MIT-SHM) to work. This means the sandboxed process can use shared memory with the host, but only for display purposes.
+Display server sockets (X11 in `/tmp/.X11-unix`, Wayland in `$XDG_RUNTIME_DIR`) are already accessible via the top-level `--ro-bind / /` and do not need explicit bind mounts. The relevant environment variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`, `XDG_RUNTIME_DIR`, `XCURSOR_THEME`, `XCURSOR_SIZE`) are allowed through env filtering when GUI is enabled.
+
+`--unshare-ipc` is **always enabled**, even with GUI. X11's MIT-SHM extension gracefully falls back to socket-based copies when IPC namespaces are isolated, and Wayland does not use SysV IPC. Keeping IPC isolation unconditional provides stronger sandboxing with no functional impact.
 
 **Audio passthrough (`enable_audio = true`):**
 
-When audio is enabled, cage bind-mounts audio server sockets:
-- PulseAudio: `--bind $XDG_RUNTIME_DIR/pulse/native $XDG_RUNTIME_DIR/pulse/native` (if exists)
-- PipeWire: `--bind $XDG_RUNTIME_DIR/pipewire-0 $XDG_RUNTIME_DIR/pipewire-0` (if exists)
+When audio is enabled, cage bind-mounts audio device nodes into the sandbox:
+- ALSA: `--dev-bind /dev/snd /dev/snd` (ALSA sound device nodes, if exists)
+
+Audio server sockets (PulseAudio in `$XDG_RUNTIME_DIR/pulse`, PipeWire in `$XDG_RUNTIME_DIR`) are already accessible via the top-level `--ro-bind / /` and do not need explicit bind mounts. The relevant environment variables (`PULSE_SERVER`, `PULSE_COOKIE`, `PIPEWIRE_REMOTE`, `XDG_RUNTIME_DIR`) are allowed through env filtering when audio is enabled.
 
 Both GUI and audio passthrough are enabled by default. Set to `false` to disable passthrough for headless/non-interactive environments.
 
