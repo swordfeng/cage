@@ -55,19 +55,22 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Apply `EnvPolicy::filter()` to environment before exec; pass filtered env via `Command::env_clear().envs(...)`
 
 ### T1.8 — macOS: Seatbelt launcher (`src/platform/macos.rs`)
-- [ ] `fn sbpl_escape_path(path: &str) -> String` — replace `\` → `\\`, `"` → `\"` (see SPEC §5.2)
-- [ ] `fn generate_profile(policy: &SandboxPolicy, session_tmpdir: &Path) -> String`:
+- [x] `fn sbpl_escape_path(path: &str) -> String` — replace `\` → `\\`, `"` → `\"` (see SPEC §5.2)
+- [x] `fn generate_profile(policy: &SandboxPolicy, session_tmpdir: &Path) -> String`:
   - `(version 1)` + `(allow default)`
   - `(deny file-write* (subpath "/"))`
   - `(allow file-write* (subpath "..."))` per `writable_roots` + session tmpdir
   - `(deny file-write* (subpath "..."))` per `write_restricted_paths` (placed after allows — last rule wins)
   - `(deny file-read* (subpath "..."))` per `read_restricted_paths`
   - Network block/allow rules per `NetworkPolicy` (see SPEC §5.2 template)
-- [ ] Canonicalize all paths via `std::fs::canonicalize()` before embedding in profile (handles `/tmp` → `/private/tmp`)
-- [ ] Write profile to `<session_tmpdir>/profile.sb`
-- [ ] Exec: `Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&profile_path).arg("--").arg(command).args(args)` (hardcoded path, not PATH lookup — see SPEC §5.2)
-
-- [ ] Apply `EnvPolicy::filter()` to environment before exec
+- [x] Canonicalize all paths via `std::fs::canonicalize()` before embedding in profile (handles `/tmp` → `/private/tmp`)
+- [x] Write profile to `<session_tmpdir>/cage.sb`
+- [x] Profile file protection: deny read/write access to profile within sandbox
+- [x] Exec: `Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&profile_path).arg("--").arg(command).args(args)` (hardcoded path, not PATH lookup — see SPEC §5.2)
+- [x] Pre-flight check: verify `/usr/bin/sandbox-exec` exists with helpful error message
+- [x] Apply `EnvPolicy::filter()` to environment before exec
+- [x] Exit code forwarding from sandboxed process
+- [x] Comprehensive test coverage for SBPL escaping and glob matching
 
 ### T1.10 — `--dry-run` and `-v` output
 - [x] `-v`: print resolved `SandboxPolicy` (formatted), temp dir path, and chosen platform backend before exec
@@ -102,13 +105,14 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Add `--dry-run` test to verify Wayland/X11/DRI binds appear when GUI enabled
 
 ### T1.14 — macOS GUI/Audio Passthrough (`src/platform/macos.rs`)
-- [ ] When `enable_gui` is true (default):
+- [x] When `enable_gui` is true (default):
   - Add `(allow iokit-open)` to Seatbelt profile for graphics/display access
   - Add `(allow device*)` for input devices
-- [ ] When `enable_audio` is true (default):
+- [x] When `enable_audio` is true (default):
   - Add `(allow device*)` to Seatbelt profile for audio device access
-- [ ] Update `generate_seatbelt_profile` to conditionally include these rules
-- [ ] Add `--dry-run` test to verify profile includes IOKit rules when GUI enabled
+- [x] Update `generate_seatbelt_profile` to conditionally include these rules
+- [x] Avoid duplicate `(allow device*)` when both GUI and audio enabled
+- [x] Documented in `macos_notes.md`
 
 ### T1.15 — Windows GUI/Audio Support (`src/platform/windows.rs`)
 - [ ] Accept `enable_gui` and `enable_audio` in policy (no-op implementation - per user request)

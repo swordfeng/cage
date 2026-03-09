@@ -247,11 +247,20 @@ mod tests {
         }
     }
 
-    /// Load config for tests - uses only bundled config to avoid side effects from local files
-    fn load_test_config(_args: &Args) -> Result<Config> {
-        // For tests, always use bundled config only to ensure consistent behavior
-        // regardless of local .cage.toml or user config files
-        toml::from_str(BUNDLED_CONFIG).context("failed to parse bundled config")
+    /// Load config for tests - uses bundled config as base to avoid side effects from local files.
+    /// CLI --config flag is still respected for test flexibility.
+    fn load_test_config(args: &Args) -> Result<Config> {
+        // Start with bundled config to avoid side effects from ~/.cage.toml or project .cage.toml
+        let mut config: Config =
+            toml::from_str(BUNDLED_CONFIG).context("failed to parse bundled config")?;
+
+        // Allow --config override for tests that need custom configs
+        if let Some(ref cli_config_path) = args.config {
+            let cli_config = load_config_file(cli_config_path)?;
+            merge_config(&mut config, cli_config);
+        }
+
+        Ok(config)
     }
 
     #[test]
