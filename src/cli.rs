@@ -14,10 +14,6 @@ pub struct Args {
     #[arg(long)]
     pub allow_network: bool,
 
-    /// Run command unsandboxed (logs a warning)
-    #[arg(long)]
-    pub no_sandbox: bool,
-
     /// Path to config file
     #[arg(short, long, value_name = "PATH")]
     pub config: Option<PathBuf>,
@@ -73,7 +69,6 @@ mod tests {
         assert_eq!(args.args, vec!["hello"]);
         assert!(args.verbose);
         assert!(!args.dry_run);
-        assert!(!args.no_sandbox);
         assert!(!args.allow_network);
     }
 
@@ -92,7 +87,6 @@ mod tests {
             "--policy",
             "default",
             "--allow-network",
-            "--no-sandbox",
             "--config",
             "/path/to/config.toml",
             "--verbose",
@@ -103,7 +97,6 @@ mod tests {
 
         assert_eq!(args.policy, Some("default".to_string()));
         assert!(args.allow_network);
-        assert!(args.no_sandbox);
         assert_eq!(args.config, Some(PathBuf::from("/path/to/config.toml")));
         assert!(args.verbose);
         assert!(args.dry_run);
@@ -168,7 +161,6 @@ mod tests {
         assert!(args.args.is_empty());
         assert!(!args.verbose);
         assert!(!args.dry_run);
-        assert!(!args.no_sandbox);
         assert!(!args.allow_network);
     }
 

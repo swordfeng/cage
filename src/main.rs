@@ -1,10 +1,11 @@
 use anyhow::Context;
 use clap::Parser;
+use rand::rngs::OsRng;
+use rand::Rng;
 use scopeguard::defer;
 use std::fs;
 use std::path::PathBuf;
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 mod cli;
 mod config;
@@ -14,13 +15,16 @@ mod policy;
 fn main() {
     let args = cli::Args::parse();
 
-    if let Err(e) = run(args) {
-        eprintln!("cage error: {}", e);
-        process::exit(1);
+    match run(args) {
+        Ok(exit_code) => process::exit(exit_code),
+        Err(e) => {
+            eprintln!("cage error: {}", e);
+            process::exit(1);
+        }
     }
 }
 
-fn run(args: cli::Args) -> anyhow::Result<()> {
+fn run(args: cli::Args) -> anyhow::Result<i32> {
     // Load and merge configuration
     let cfg = config::load_config(&args)?;
 
@@ -67,26 +71,13 @@ fn run(args: cli::Args) -> anyhow::Result<()> {
     // Handle dry-run: exit without executing
     if is_dry_run {
         println!("\n(Dry run - not executing)");
-        return Ok(());
-    }
-
-    // Handle no-sandbox mode
-    if args.no_sandbox {
-        eprintln!("Warning: Running without sandbox (--no-sandbox)");
-        // Execute command directly without sandboxing
-        let status = process::Command::new(&args.command)
-            .args(&args.args)
-            .status()
-            .map_err(|e| anyhow::anyhow!("failed to execute command: {}", e))?;
-
-        let code = status.code().unwrap_or(1);
-        process::exit(code);
+        return Ok(0);
     }
 
     // Run command in sandbox
     let exit_code = platform::run_sandboxed(&policy, &args.command, &args.args, &session_tmpdir, args.verbose)?;
 
-    process::exit(exit_code);
+    Ok(exit_code)
 }
 
 /// Print structured debug information for verbose/dry-run modes
@@ -191,9 +182,13 @@ fn print_debug_info(
 
     #[cfg(target_os = "linux")]
     {
-        let argv = platform::linux::generate_bwrap_argv(policy, command, args, session_tmpdir);
+        // Find bwrap path for display (uses system global locations, not PATH)
+        let bwrap_path = platform::linux::find_bwrap_binary()
+            .unwrap_or_else(|| std::path::PathBuf::from("bwrap"));
+        let bwrap_display = bwrap_path.to_string_lossy();
+        let argv = platform::linux::generate_bwrap_argv(policy, command, args, session_tmpdir, &bwrap_path);
         print("bwrap command:");
-        print(&format!("  bwrap --args <memfd> -- {} {}", command, args.join(" ")));
+        print(&format!("  {} --args <memfd> -- {} {}", bwrap_display, command, args.join(" ")));
         print("");
         print("Arguments passed via memfd:");
         print(&format!("  {}", argv[1..].join(" ")));
@@ -228,12 +223,7 @@ fn print_debug_info(
 /// Format: /tmp/cage-{PID}-{RAND}/ (Linux/macOS) or %TEMP%\cage-{PID}-{RAND}\ (Windows)
 fn create_session_tmpdir() -> anyhow::Result<PathBuf> {
     let pid = process::id();
-    // Use timestamp nanos as random component (good enough for this use case)
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    let rand_component = nanos % 10000;
+    let rand_component = generate_rand_component();
 
     let tmpdir = std::env::temp_dir().join(format!("cage-{}-{}", pid, rand_component));
     fs::create_dir_all(&tmpdir).with_context(|| {
@@ -244,6 +234,18 @@ fn create_session_tmpdir() -> anyhow::Result<PathBuf> {
     })?;
 
     Ok(tmpdir)
+}
+
+/// Generate a cryptographically secure random alphanumeric component
+fn generate_rand_component() -> String {
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = OsRng;
+    (0..8)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -273,7 +275,30 @@ mod tests {
         assert!(name.starts_with("cage-"));
         assert!(name.contains(&process::id().to_string()));
 
+        // Should have 8-character alphanumeric suffix
+        let parts: Vec<&str> = name.split('-').collect();
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[2].len(), 8);
+        assert!(parts[2].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+
         // Cleanup test directory
         let _ = fs::remove_dir_all(&tmpdir);
+    }
+
+    #[test]
+    fn test_generate_rand_component() {
+        let component1 = generate_rand_component();
+        let component2 = generate_rand_component();
+
+        // Should be 8 characters
+        assert_eq!(component1.len(), 8);
+        assert_eq!(component2.len(), 8);
+
+        // Should be alphanumeric lowercase
+        assert!(component1.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(component2.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+
+        // Should be different (with very high probability)
+        assert_ne!(component1, component2);
     }
 }

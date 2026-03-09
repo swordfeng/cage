@@ -240,7 +240,6 @@ mod tests {
         Args {
             policy: None,
             allow_network: false,
-            no_sandbox: false,
             config: None,
             writable: vec![],
             write_restrict: vec![],

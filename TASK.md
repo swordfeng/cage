@@ -13,7 +13,7 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Embed `config/cage.toml` via `include_str!` at compile time for bundled defaults
 
 ### T1.2 — CLI argument parsing (`src/cli.rs`)
-- [x] `clap` derive struct with all flags from SPEC §9: `--policy`, `--allow-network`, `--no-sandbox`, `--config`, `--writable`, `--write-restrict`, `--read-restrict`, `-v/--verbose`, `--dry-run`
+- [x] `clap` derive struct with all flags from SPEC §9: `--policy`, `--allow-network`, `--config`, `--writable`, `--write-restrict`, `--read-restrict`, `-v/--verbose`, `--dry-run`
 - [x] Positional `<COMMAND> [ARGS]...` with `trailing_var_arg = true` and `allow_hyphen_values`
 - [x] `--policy` accepts `NAME` (Phase 1); documented `NAME+NAME` as Phase 2 in help text
 
@@ -53,7 +53,6 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Check `bwrap` availability on startup: `Command::new("bwrap").arg("--version")`; clear error if missing with install hint
 - [x] Check unprivileged user namespaces: read `/proc/sys/kernel/unprivileged_userns_clone`; error if `0` and bwrap is not setuid
 - [x] Apply `EnvPolicy::filter()` to environment before exec; pass filtered env via `Command::env_clear().envs(...)`
-- [x] `--no-sandbox`: log warning, exec command directly without bwrap (handled in main.rs)
 
 ### T1.8 — macOS: Seatbelt launcher (`src/platform/macos.rs`)
 - [ ] `fn sbpl_escape_path(path: &str) -> String` — replace `\` → `\\`, `"` → `\"` (see SPEC §5.2)
@@ -81,7 +80,6 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] `network = "full"`: attempt connection to localhost echo server; assert success
 - [ ] Env filtering: verify `*_TOKEN` pattern vars absent in child process env (blocklist mode)
 - [ ] Env filtering: verify only `PATH` present in child env (allowlist mode)
-- [ ] `--no-sandbox`: command runs, exits with forwarded exit code
 - [ ] Run cage as subprocess via `Command`; check exit code forwarding
 
 ### T1.12 — GUI/Audio Policy Fields (`src/policy/types.rs`)

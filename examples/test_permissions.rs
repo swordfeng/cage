@@ -25,13 +25,22 @@ fn test_dir_listing(path: &Path) -> (bool, String) {
 }
 
 /// Test if file content reading is allowed
-fn test_file_read(path: &Path) -> (bool, String) {
+/// For directories, reads the provided test_file if available, otherwise tries to find an existing file
+fn test_file_read(path: &Path, test_file: Option<&Path>) -> (bool, String) {
     if !path.exists() {
         return (false, "Path does not exist".to_string());
     }
 
     if path.is_dir() {
-        // For directories, try to read a file inside it
+        // For directories, first try to read the provided test file (if write succeeded)
+        if let Some(test) = test_file {
+            match fs::read(test) {
+                Ok(_) => return (true, "".to_string()),
+                Err(e) => return (false, e.to_string()),
+            }
+        }
+
+        // Otherwise, try to read a file inside it
         match fs::read_dir(path) {
             Ok(entries) => {
                 for entry in entries.flatten() {
@@ -55,36 +64,31 @@ fn test_file_read(path: &Path) -> (bool, String) {
     }
 }
 
-/// Non-destructive test of write permission (creates temp file, cleans up)
-fn test_write_permission(path: &Path) -> (bool, String) {
+/// Non-destructive test of write permission (creates temp file)
+/// Returns (success, error_message, test_file_path) where test_file_path is Some if a file was created
+fn test_write_permission(path: &Path) -> (bool, String, Option<PathBuf>) {
     if path.is_dir() {
         let test_file = path.join(format!(".cage_test_{}", std::process::id()));
         match fs::write(&test_file, b"test") {
-            Ok(_) => {
-                let _ = fs::remove_file(&test_file);
-                (true, "".to_string())
-            }
-            Err(e) => (false, e.to_string()),
+            Ok(_) => (true, "".to_string(), Some(test_file)),
+            Err(e) => (false, e.to_string(), None),
         }
     } else if path.is_file() {
         match fs::OpenOptions::new().write(true).append(true).open(path) {
-            Ok(_) => (true, "".to_string()),
-            Err(e) => (false, e.to_string()),
+            Ok(_) => (true, "".to_string(), None),
+            Err(e) => (false, e.to_string(), None),
         }
     } else if let Some(parent) = path.parent() {
         if parent.exists() {
             match fs::write(path, b"test") {
-                Ok(_) => {
-                    let _ = fs::remove_file(path);
-                    (true, "".to_string())
-                }
-                Err(e) => (false, e.to_string()),
+                Ok(_) => (true, "".to_string(), Some(path.to_path_buf())),
+                Err(e) => (false, e.to_string(), None),
             }
         } else {
-            (false, "Parent directory does not exist".to_string())
+            (false, "Parent directory does not exist".to_string(), None)
         }
     } else {
-        (false, "Path does not exist".to_string())
+        (false, "Path does not exist".to_string(), None)
     }
 }
 
@@ -105,6 +109,59 @@ fn run_test(
 
     let mut tests = Vec::new();
     let mut all_passed = true;
+    let mut created_test_file: Option<PathBuf> = None;
+
+    // Test write permission FIRST
+    // This creates a test file we can use for read testing
+    if let Some(expected) = expect_write {
+        let (can_write, error, test_file) = test_write_permission(path);
+        created_test_file = test_file;
+        let passed = can_write == expected;
+        tests.push((
+            "write".to_string(),
+            can_write,
+            expected,
+            passed,
+            error.clone(),
+        ));
+        println!(
+            "Write: {} {}",
+            if can_write { "ALLOWED" } else { "DENIED" },
+            if passed { "✓ PASS" } else { "✗ FAIL" }
+        );
+        if !passed && !error.is_empty() {
+            println!("  Error: {}", error);
+        }
+        all_passed = all_passed && passed;
+    }
+
+    // Test file content reading
+    // If write succeeded and created a test file, use it for reading
+    if let Some(expected) = expect_read_content {
+        let (can_read, error) = test_file_read(path, created_test_file.as_deref());
+        let passed = can_read == expected;
+        tests.push((
+            "read_content".to_string(),
+            can_read,
+            expected,
+            passed,
+            error.clone(),
+        ));
+        println!(
+            "File content read: {} {}",
+            if can_read { "ALLOWED" } else { "DENIED" },
+            if passed { "✓ PASS" } else { "✗ FAIL" }
+        );
+        if !passed && !error.is_empty() {
+            println!("  Error: {}", error);
+        }
+        all_passed = all_passed && passed;
+    }
+
+    // Clean up test file after read test is done
+    if let Some(test_file) = created_test_file {
+        let _ = fs::remove_file(&test_file);
+    }
 
     // Test directory listing (for directories)
     if is_dir {
@@ -145,50 +202,6 @@ fn run_test(
                 println!("  Note: {}", error);
             }
         }
-    }
-
-    // Test file content reading
-    if let Some(expected) = expect_read_content {
-        let (can_read, error) = test_file_read(path);
-        let passed = can_read == expected;
-        tests.push((
-            "read_content".to_string(),
-            can_read,
-            expected,
-            passed,
-            error.clone(),
-        ));
-        println!(
-            "File content read: {} {}",
-            if can_read { "ALLOWED" } else { "DENIED" },
-            if passed { "✓ PASS" } else { "✗ FAIL" }
-        );
-        if !passed && !error.is_empty() {
-            println!("  Error: {}", error);
-        }
-        all_passed = all_passed && passed;
-    }
-
-    // Test write permission
-    if let Some(expected) = expect_write {
-        let (can_write, error) = test_write_permission(path);
-        let passed = can_write == expected;
-        tests.push((
-            "write".to_string(),
-            can_write,
-            expected,
-            passed,
-            error.clone(),
-        ));
-        println!(
-            "Write: {} {}",
-            if can_write { "ALLOWED" } else { "DENIED" },
-            if passed { "✓ PASS" } else { "✗ FAIL" }
-        );
-        if !passed && !error.is_empty() {
-            println!("  Error: {}", error);
-        }
-        all_passed = all_passed && passed;
     }
 
     TestResult {

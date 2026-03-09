@@ -765,7 +765,6 @@ ARGS:
 OPTIONS:
     -p, --policy <NAME>             Named policy (default: "default"). Phase 2: supports NAME+NAME composition.
         --allow-network             Shorthand: use current policy but override network to "full"
-        --no-sandbox                Run command unsandboxed (logs a warning)
         --config <PATH>             Use alternative config file instead of ~/.config/cage/cage.toml
         --writable <PATH>           Add an extra writable root (repeatable)
         --write-restrict <PATH>     Add an extra write-restricted path (repeatable)
@@ -780,7 +779,6 @@ EXAMPLES:
     cage --allow-network claude         # Uses 'default' policy + adds network access
     cage --policy strict codex          # Overrides default, uses 'strict' policy
     cage --policy strict ./build.sh
-    cage --no-sandbox npm test
 ```
 
 ---

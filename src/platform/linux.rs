@@ -3,20 +3,46 @@ use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// System global install locations for bwrap, in order of preference
+pub const BWRAP_GLOBAL_PATHS: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
+
+/// Find bwrap binary in system global install locations
+pub fn find_bwrap_binary() -> Option<PathBuf> {
+    for path in BWRAP_GLOBAL_PATHS {
+        let p = Path::new(path);
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
 /// Check if bubblewrap is available and user namespaces are supported
-fn check_bwrap_prerequisites() -> Result<()> {
-    // Check bwrap availability
-    let output = Command::new("bwrap")
+/// Returns the full path to the bwrap binary
+fn check_bwrap_prerequisites() -> Result<PathBuf> {
+    // Find bwrap in system global locations (not PATH)
+    let bwrap_path = find_bwrap_binary().ok_or_else(|| {
+        anyhow::anyhow!(
+            "bubblewrap (bwrap) is not installed in a system location. \
+             Searched: {}. \
+             Please install bubblewrap (e.g., 'sudo apt install bubblewrap' on Debian/Ubuntu, \
+             'sudo dnf install bubblewrap' on Fedora, or 'sudo pacman -S bubblewrap' on Arch)",
+            BWRAP_GLOBAL_PATHS.join(", ")
+        )
+    })?;
+
+    // Check bwrap availability by running --version
+    let output = Command::new(&bwrap_path)
         .arg("--version")
         .output()
         .map_err(|e| {
             anyhow::anyhow!(
-                "bubblewrap (bwrap) is not installed or not in PATH: {}. \
-                 Please install bubblewrap (e.g., 'sudo apt install bubblewrap' on Debian/Ubuntu, \
-                 'sudo dnf install bubblewrap' on Fedora, or 'sudo pacman -S bubblewrap' on Arch)",
+                "bubblewrap (bwrap) is installed at {} but cannot be executed: {}. \
+                 Please check permissions and installation.",
+                bwrap_path.display(),
                 e
             )
         })?;
@@ -34,38 +60,26 @@ fn check_bwrap_prerequisites() -> Result<()> {
         let value: i32 = content.trim().parse().unwrap_or(1);
         if value == 0 {
             // Check if bwrap is setuid (which would work even without unprivileged userns)
-            // Check common bwrap locations
-            let bwrap_paths = ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
-            let mut bwrap_path = None;
-            for path in &bwrap_paths {
-                if Path::new(path).exists() {
-                    bwrap_path = Some(Path::new(path));
-                    break;
-                }
-            }
+            let metadata =
+                std::fs::metadata(&bwrap_path).context("failed to check bwrap binary permissions")?;
 
-            if let Some(path) = bwrap_path {
-                let metadata =
-                    std::fs::metadata(path).context("failed to check bwrap binary permissions")?;
+            let permissions = metadata.permissions();
+            let is_setuid = permissions.mode() & 0o4000 != 0;
 
-                let permissions = metadata.permissions();
-                let is_setuid = permissions.mode() & 0o4000 != 0;
-
-                if !is_setuid {
-                    return Err(anyhow::anyhow!(
-                        "Unprivileged user namespaces are disabled on this system \
-                         ({} = 0) and bwrap is not setuid. \
-                         Either enable unprivileged user namespaces (echo 1 | sudo tee {}) \
-                         or install a setuid bwrap binary.",
-                        userns_path,
-                        userns_path
-                    ));
-                }
+            if !is_setuid {
+                return Err(anyhow::anyhow!(
+                    "Unprivileged user namespaces are disabled on this system \
+                     ({} = 0) and bwrap is not setuid. \
+                     Either enable unprivileged user namespaces (echo 1 | sudo tee {}) \
+                     or install a setuid bwrap binary.",
+                    userns_path,
+                    userns_path
+                ));
             }
         }
     }
 
-    Ok(())
+    Ok(bwrap_path)
 }
 
 /// Filter environment variables based on policy
@@ -121,12 +135,15 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
     options.push("/".to_string());
     options.push("/".to_string());
 
-    // Device and proc filesystems
+    // Device, proc and tmp filesystems
     options.push("--dev".to_string());
     options.push("/dev".to_string());
 
     options.push("--proc".to_string());
     options.push("/proc".to_string());
+
+    options.push("--tmpfs".to_string());
+    options.push("/tmp".to_string());
 
     // Writable roots (in order)
     for path in &policy.writable_roots {
@@ -221,8 +238,9 @@ pub fn generate_bwrap_argv(
     command: &str,
     args: &[String],
     session_tmpdir: &Path,
+    bwrap_path: &Path,
 ) -> Vec<String> {
-    let mut argv = vec!["bwrap".to_string()];
+    let mut argv = vec![bwrap_path.to_string_lossy().to_string()];
     argv.extend(generate_bwrap_options(policy, session_tmpdir));
 
     // Command separator and the actual command
@@ -241,7 +259,8 @@ pub fn run_sandboxed(
     verbose: bool,
 ) -> Result<i32> {
     // Check prerequisites (bwrap availability and user namespace support)
-    check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
+    // Get the full path to bwrap binary from system global location
+    let bwrap_path = check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
 
     // Filter environment according to policy, appending allow filters for GUI/audio vars.
     // Appended = lowest priority: explicit user filters earlier in the list still win.
@@ -257,6 +276,14 @@ pub fn run_sandboxed(
             ep.filters.push(EnvFilter { pattern: var.to_string(), action: FilterAction::Allow });
         }
     }
+    
+    // Set TMPDIR to session_tmpdir if not explicitly configured in env policy
+    if !ep.set.contains_key("TMPDIR") {
+        if let Some(canonical) = canonicalize_path(session_tmpdir) {
+            ep.set.insert("TMPDIR".to_string(), canonical.to_string_lossy().to_string());
+        }
+    }
+    
     let filtered_env = filter_environment(&ep);
 
     // Generate bwrap options (without bwrap binary and without command)
@@ -264,7 +291,7 @@ pub fn run_sandboxed(
 
     // Log full command for debugging if verbose mode
     if verbose {
-        let full_argv = generate_bwrap_argv(policy, command, args, session_tmpdir);
+        let full_argv = generate_bwrap_argv(policy, command, args, session_tmpdir, &bwrap_path);
         eprintln!("[verbose] bwrap command (what would be passed via memfd):");
         eprintln!("[verbose]   {}", full_argv.join(" "));
     }
@@ -274,8 +301,8 @@ pub fn run_sandboxed(
     let args_fd = create_args_memfd(&bwrap_options)
         .with_context(|| "failed to create memfd for bwrap arguments")?;
 
-    // Build command: bwrap --args <fd> -- <command> [args...]
-    let mut cmd = Command::new("bwrap");
+    // Build command using full path to bwrap: <bwrap_path> --args <fd> -- <command> [args...]
+    let mut cmd = Command::new(&bwrap_path);
     cmd.arg("--args").arg(args_fd.to_string()).arg("--");
     cmd.arg(command);
     cmd.args(args);
