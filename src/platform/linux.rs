@@ -1,4 +1,4 @@
-use crate::policy::types::{EnvPolicy, NetworkPolicy, SandboxPolicy};
+use crate::policy::types::{EnvFilter, EnvPolicy, FilterAction, NetworkPolicy, SandboxPolicy};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -215,6 +215,25 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
         }
     }
 
+    // GUI access: DRI devices for GPU/hardware acceleration
+    if policy.enable_gui() && Path::new("/dev/dri").exists() {
+        options.push("--dev-bind".to_string());
+        options.push("/dev/dri".to_string());
+        options.push("/dev/dri".to_string());
+    }
+
+    // Audio access: ALSA sound devices
+    if policy.enable_audio() && Path::new("/dev/snd").exists() {
+        options.push("--dev-bind".to_string());
+        options.push("/dev/snd".to_string());
+        options.push("/dev/snd".to_string());
+    }
+
+    // POSIX shared memory: always a private tmpfs so shm_open() works inside the
+    // sandbox without sharing host memory. Isolated per-sandbox, no security impact.
+    options.push("--tmpfs".to_string());
+    options.push("/dev/shm".to_string());
+
     // Network policy
     match policy.network() {
         NetworkPolicy::None => {
@@ -266,8 +285,21 @@ pub fn run_sandboxed(
     // Check prerequisites (bwrap availability and user namespace support)
     check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
 
-    // Filter environment according to policy
-    let filtered_env = filter_environment(policy.env());
+    // Filter environment according to policy, appending allow filters for GUI/audio vars.
+    // Appended = lowest priority: explicit user filters earlier in the list still win.
+    let mut ep = policy.env().clone();
+    if policy.enable_gui() {
+        for var in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
+                    "XCURSOR_THEME", "XCURSOR_SIZE"] {
+            ep.filters.push(EnvFilter { pattern: var.to_string(), action: FilterAction::Allow });
+        }
+    }
+    if policy.enable_audio() {
+        for var in ["PULSE_SERVER", "PULSE_COOKIE", "PIPEWIRE_REMOTE", "XDG_RUNTIME_DIR"] {
+            ep.filters.push(EnvFilter { pattern: var.to_string(), action: FilterAction::Allow });
+        }
+    }
+    let filtered_env = filter_environment(&ep);
 
     // Generate bwrap options (without bwrap binary and without command)
     let bwrap_options = generate_bwrap_options(policy, session_tmpdir);

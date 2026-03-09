@@ -14,6 +14,10 @@ pub struct SandboxPolicy {
     pub(crate) network: Option<NetworkPolicy>,
     /// Environment policy - if None, use base value during merge
     pub(crate) env: Option<EnvPolicy>,
+    /// Allow GUI access (X11/Wayland sockets, DRI devices) - if None, use base value during merge
+    pub(crate) enable_gui: Option<bool>,
+    /// Allow audio access (ALSA/PulseAudio/PipeWire) - if None, use base value during merge
+    pub(crate) enable_audio: Option<bool>,
 }
 
 impl Default for SandboxPolicy {
@@ -24,6 +28,8 @@ impl Default for SandboxPolicy {
             read_restricted_paths: Vec::new(),
             network: None,
             env: None,
+            enable_gui: None,
+            enable_audio: None,
         }
     }
 }
@@ -55,11 +61,29 @@ impl SandboxPolicy {
                 self.env = Some(other_env.clone());
             }
         }
+
+        // enable_gui / enable_audio: override only if explicitly set
+        if let Some(v) = other.enable_gui {
+            self.enable_gui = Some(v);
+        }
+        if let Some(v) = other.enable_audio {
+            self.enable_audio = Some(v);
+        }
     }
 
     /// Get network policy, using default if not set
     pub fn network(&self) -> &NetworkPolicy {
         self.network.as_ref().unwrap_or(&NetworkPolicy::Full)
+    }
+
+    /// Get enable_gui, defaulting to false (secure default)
+    pub fn enable_gui(&self) -> bool {
+        self.enable_gui.unwrap_or(false)
+    }
+
+    /// Get enable_audio, defaulting to false (secure default)
+    pub fn enable_audio(&self) -> bool {
+        self.enable_audio.unwrap_or(false)
     }
 
     /// Get env policy, using default if not set
@@ -460,6 +484,8 @@ block = ["OLD"]
                 )
                 .unwrap(),
             ),
+            enable_gui: None,
+            enable_audio: None,
         };
 
         let other = SandboxPolicy {
@@ -478,6 +504,8 @@ set = { KEY = "value" }
                 )
                 .unwrap(),
             ),
+            enable_gui: None,
+            enable_audio: None,
         };
 
         base.merge(&other);
@@ -512,6 +540,8 @@ set = { KEY = "value" }
             read_restricted_paths: vec![],
             network: Some(NetworkPolicy::None),
             env: None,
+            enable_gui: None,
+            enable_audio: None,
         };
 
         let other = SandboxPolicy {
@@ -520,6 +550,8 @@ set = { KEY = "value" }
             read_restricted_paths: vec![],
             network: None, // Not set
             env: None,
+            enable_gui: None,
+            enable_audio: None,
         };
 
         base.merge(&other);
@@ -546,6 +578,8 @@ allow = ["PATH"]
                 )
                 .unwrap(),
             ),
+            enable_gui: None,
+            enable_audio: None,
         };
 
         let other = SandboxPolicy {
@@ -561,6 +595,8 @@ mode = "allowlist"
                 )
                 .unwrap(),
             ),
+            enable_gui: None,
+            enable_audio: None,
         };
 
         base.merge(&other);
