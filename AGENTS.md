@@ -79,6 +79,40 @@ Check `Cargo.toml` before adding new dependencies. Prefer:
 - Existing dependencies in the project
 - Well-maintained crates with good documentation
 
+## Anti-Hallucination Rules
+
+**ALWAYS verify before claiming:**
+
+1. **Read file contents before describing them** - Never assume what a file contains based on its name or your training data. Use `read` tool.
+
+2. **Search before stating patterns exist** - Use `grep` to verify claims about code patterns, API usage, or constant definitions.
+
+3. **Check for duplicates before creating** - Before defining constants, types, or functions, search if they already exist.
+
+4. **Don't invent APIs** - If an API doesn't exist in the codebase, don't use it. Check imports and existing implementations.
+
+5. **Verify variable/field names** - Don't guess struct field names or variable names. Read the actual definitions.
+
+6. **Test assumptions** - If you're about to say "we have X" or "there is Y", verify it first with the appropriate tool.
+
+7. **When unsure, ask** - It's better to ask the user for clarification than to make up an answer.
+
+**Examples of what NOT to do:**
+- "We have `allow` and `block` fields in EnvPolicy" (check if these exist first)
+- "The constant is defined in main.rs" (check all files first)
+- "This function returns X" (read the function implementation)
+
+## Code Deduplication
+
+**IMPORTANT: Never duplicate `include_str!` or similar constants across files.**
+
+Before defining a constant with `include_str!`, `include_bytes!`, or similar macros:
+1. Search the codebase: `grep -r "include_str!" src/`
+2. If it already exists, import it instead of duplicating
+3. Example: Tests should use `crate::config::BUNDLED_CONFIG` rather than defining their own
+
+This prevents embedding the same file multiple times in the binary and ensures single source of truth.
+
 ## Questions?
 
 Refer to SPEC.md for detailed technical specifications or ask for clarification on implementation details.
