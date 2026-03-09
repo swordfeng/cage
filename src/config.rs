@@ -225,10 +225,6 @@ fn merge_config(base: &mut Config, other: Config) {
     let mut merged = other.command_policy;
     merged.extend(std::mem::take(&mut base.command_policy));
     base.command_policy = merged;
-
-    // Merge platform config
-    // Note: PlatformConfig uses Default, so we just use other's values directly
-    base.platform = other.platform;
 }
 
 #[cfg(test)]

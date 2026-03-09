@@ -42,6 +42,3 @@ policy = "default"
 [[command_policy]]
 pattern = "aider"
 policy = "strict"
-
-[platform]
-fail_on_sandbox_error = true

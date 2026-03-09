@@ -228,13 +228,6 @@ pattern = "aider"
 policy = "strict"
 ```
 
-#### Platform-specific overrides
-```toml
-[platform]
-fail_on_sandbox_error = true    # Linux/macOS: set false to warn-and-continue if sandbox breaks
-cage_group = "CageUsers"        # Windows only: ignored on other platforms
-```
-
 ### 4.2 Policy merge semantics (Phase 2)
 
 > **Note:** Policy composition is a Phase 2 feature. In Phase 1, only a single policy name is supported via `--policy <NAME>`.
@@ -318,7 +311,6 @@ pub struct CommandPolicy {
 pub struct Config {
     pub policies: HashMap<String, SandboxPolicy>,
     pub command_policy: Vec<CommandPolicy>,  // ordered list, first match wins
-    pub platform: PlatformConfig,
 }
 
 impl Config {

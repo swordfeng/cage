@@ -73,7 +73,7 @@ impl SandboxPolicy {
 
     /// Get network policy, using default if not set
     pub fn network(&self) -> &NetworkPolicy {
-        self.network.as_ref().unwrap_or(&NetworkPolicy::Full)
+        self.network.as_ref().unwrap_or(&NetworkPolicy::None)
     }
 
     /// Get enable_gui, defaulting to false (secure default)
@@ -111,12 +111,8 @@ pub enum NetworkPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum EnvMode {
     /// Default to allowing environment variables (pass through by default)
-    /// Previously called "blocklist" - allows all, blocks only explicit patterns
-    #[serde(alias = "blocklist")]
     DefaultAllow,
     /// Default to blocking environment variables (filter by default)
-    /// Previously called "allowlist" - blocks all, allows only explicit patterns  
-    #[serde(alias = "allowlist")]
     DefaultBlock,
 }
 
@@ -238,66 +234,12 @@ pub struct CommandPolicy {
     pub policy: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct PlatformConfig {
-    #[serde(default)]
-    pub linux: LinuxPlatformConfig,
-    #[serde(default)]
-    pub macos: MacosPlatformConfig,
-    #[serde(default)]
-    pub windows: WindowsPlatformConfig,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LinuxPlatformConfig {
-    #[serde(default = "default_true")]
-    pub fail_on_sandbox_error: bool,
-}
-
-impl Default for LinuxPlatformConfig {
-    fn default() -> Self {
-        Self {
-            fail_on_sandbox_error: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MacosPlatformConfig {
-    #[serde(default = "default_true")]
-    pub fail_on_sandbox_error: bool,
-}
-
-impl Default for MacosPlatformConfig {
-    fn default() -> Self {
-        Self {
-            fail_on_sandbox_error: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct WindowsPlatformConfig {
-    #[serde(default = "default_cage_group")]
-    pub cage_group: String,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-fn default_cage_group() -> String {
-    "CageUsers".to_string()
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub policies: HashMap<String, SandboxPolicy>,
     #[serde(default)]
     pub command_policy: Vec<CommandPolicy>,
-    #[serde(default)]
-    pub platform: PlatformConfig,
 }
 
 impl Config {
@@ -338,21 +280,6 @@ mod tests {
         assert!(config.policies.contains_key("default"));
         assert!(config.policies.contains_key("strict"));
         assert_eq!(config.command_policy.len(), 4);
-    }
-
-    #[test]
-    fn test_platform_defaults() {
-        // Default trait must give fail_on_sandbox_error = true,
-        // matching the serde default, so missing TOML sections behave correctly.
-        let linux = LinuxPlatformConfig::default();
-        assert!(linux.fail_on_sandbox_error);
-        let macos = MacosPlatformConfig::default();
-        assert!(macos.fail_on_sandbox_error);
-
-        // PlatformConfig::default() should propagate
-        let platform = PlatformConfig::default();
-        assert!(platform.linux.fail_on_sandbox_error);
-        assert!(platform.macos.fail_on_sandbox_error);
     }
 
     #[test]

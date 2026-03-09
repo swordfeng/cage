@@ -98,22 +98,18 @@ fn canonicalize_path(path: &Path) -> Option<std::path::PathBuf> {
 
 /// Get XDG_RUNTIME_DIR path
 /// Returns the environment variable if set, otherwise defaults to /run/user/<uid>
-fn get_xdg_runtime_dir() -> Option<PathBuf> {
+fn get_xdg_runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
-        let path = PathBuf::from(dir);
-        if path.exists() {
-            return Some(path);
+        if !dir.is_empty() {
+            let path = PathBuf::from(dir);
+            return path;
         }
     }
 
     // Fallback to /run/user/<uid>
     let uid = nix::unistd::getuid().as_raw();
     let path = PathBuf::from(format!("/run/user/{}", uid));
-    if path.exists() {
-        return Some(path);
-    }
-
-    None
+    return path;
 }
 
 /// Probe directory for entries matching a prefix and return matching paths
@@ -184,10 +180,8 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
 
     // XDG_RUNTIME_DIR: mount as tmpfs (always, for isolation)
     let xdg_runtime_dir = get_xdg_runtime_dir();
-    if let Some(ref runtime_dir) = xdg_runtime_dir {
-        options.push("--tmpfs".to_string());
-        options.push(runtime_dir.to_string_lossy().to_string());
-    }
+    options.push("--tmpfs".to_string());
+    options.push(xdg_runtime_dir.to_string_lossy().to_string());
 
     // Writable roots (in order)
     for path in &policy.writable_roots {
@@ -242,12 +236,10 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
 
     // GUI access: Wayland sockets (probe wayland-* pattern)
     if policy.enable_gui() {
-        if let Some(ref runtime_dir) = xdg_runtime_dir {
-            for socket_path in probe_runtime_sockets(runtime_dir, "wayland-") {
-                options.push("--ro-bind".to_string());
-                options.push(socket_path.to_string_lossy().to_string());
-                options.push(socket_path.to_string_lossy().to_string());
-            }
+        for socket_path in probe_runtime_sockets(&xdg_runtime_dir, "wayland-") {
+            options.push("--ro-bind".to_string());
+            options.push(socket_path.to_string_lossy().to_string());
+            options.push(socket_path.to_string_lossy().to_string());
         }
 
         // X11: bind /tmp/.X11-unix (sockets are writable in practice)
@@ -267,20 +259,18 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
 
     // Audio access: PulseAudio socket
     if policy.enable_audio() {
-        if let Some(ref runtime_dir) = xdg_runtime_dir {
-            let pulse_socket = runtime_dir.join("pulse/native");
-            if pulse_socket.exists() {
-                options.push("--ro-bind".to_string());
-                options.push(pulse_socket.to_string_lossy().to_string());
-                options.push(pulse_socket.to_string_lossy().to_string());
-            }
+        let pulse_socket = xdg_runtime_dir.join("pulse/native");
+        if pulse_socket.exists() {
+            options.push("--ro-bind".to_string());
+            options.push(pulse_socket.to_string_lossy().to_string());
+            options.push(pulse_socket.to_string_lossy().to_string());
+        }
 
-            // PipeWire sockets (probe pipewire-* pattern)
-            for socket_path in probe_runtime_sockets(runtime_dir, "pipewire-") {
-                options.push("--ro-bind".to_string());
-                options.push(socket_path.to_string_lossy().to_string());
-                options.push(socket_path.to_string_lossy().to_string());
-            }
+        // PipeWire sockets (probe pipewire-* pattern)
+        for socket_path in probe_runtime_sockets(&xdg_runtime_dir, "pipewire-") {
+            options.push("--ro-bind".to_string());
+            options.push(socket_path.to_string_lossy().to_string());
+            options.push(socket_path.to_string_lossy().to_string());
         }
     }
 
@@ -370,9 +360,7 @@ pub fn run_sandboxed(
 
     // Set XDG_RUNTIME_DIR if not explicitly configured in env policy
     if !ep.set.contains_key("XDG_RUNTIME_DIR") {
-        if let Some(ref runtime_dir) = xdg_runtime_dir {
-            ep.set.insert("XDG_RUNTIME_DIR".to_string(), runtime_dir.to_string_lossy().to_string());
-        }
+        ep.set.insert("XDG_RUNTIME_DIR".to_string(), xdg_runtime_dir.to_string_lossy().to_string());
     }
 
     let filtered_env = filter_environment(&ep);

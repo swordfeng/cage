@@ -66,7 +66,7 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] Canonicalize all paths via `std::fs::canonicalize()` before embedding in profile (handles `/tmp` → `/private/tmp`)
 - [ ] Write profile to `<session_tmpdir>/profile.sb`
 - [ ] Exec: `Command::new("/usr/bin/sandbox-exec").arg("-f").arg(&profile_path).arg("--").arg(command).args(args)` (hardcoded path, not PATH lookup — see SPEC §5.2)
-- [ ] `fail_on_sandbox_error = false`: if `sandbox-exec` fails to exec, log warning and exec command directly
+
 - [ ] Apply `EnvPolicy::filter()` to environment before exec
 
 ### T1.10 — `--dry-run` and `-v` output
