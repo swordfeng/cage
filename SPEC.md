@@ -146,7 +146,7 @@ network = "full"
 enable_gui = true                     # passthrough display server (Wayland/X11) and GPU
 enable_audio = true                   # passthrough PulseAudio/PipeWire sockets
 [policies.default.env]
-mode = "blocklist"
+mode = "default_allow"
 block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "AWS_*", "GITHUB_*"]
 set = { CAGE = "1" }
 
@@ -158,9 +158,9 @@ network = "none"
 enable_gui = true                     # GUI/audio enabled by default even in strict
 enable_audio = true
 [policies.strict.env]
-mode = "allowlist"                    # "allowlist" | "blocklist"
-allow = ["PATH"]                      # for allowlist mode: only these vars
-# block = ["SECRET_*"]                # for blocklist mode: exclude these
+mode = "default_block"                # "default_allow" | "default_block"
+allow = ["PATH"]                      # for default_block mode: only these vars
+# block = ["SECRET_*"]                # for default_allow mode: exclude these
 set = { CAGE = "1" }                  # always set these
 
 # Phase 3: Domain-filtered network access (via built-in proxy)
@@ -168,7 +168,7 @@ set = { CAGE = "1" }                  # always set these
 # writable_roots = ["$CWD"]
 # network = { type = "proxy", allowed_domains = ["github.com", "npmjs.com", "registry.npmjs.org"] }
 # [policies.web-build.env]
-# mode = "allowlist"
+# mode = "default_block"
 # allow = ["PATH", "NODE_ENV"]
 # set = { CAGE = "1" }
 ```
@@ -683,10 +683,10 @@ Environment variables are filtered using one of two modes:
 
 | Mode | Behavior | Use case |
 |---|---|---|
-| `allowlist` | Only variables matching `env.allow` patterns are passed through | Maximum security - explicit opt-in |
-| `blocklist` | All variables except those matching `env.block` are passed through | Convenient - only exclude sensitive vars |
+| `default_block` | Only variables matching `env.allow` patterns are passed through | Maximum security - explicit opt-in |
+| `default_allow` | All variables except those matching `env.block` are passed through | Convenient - only exclude sensitive vars |
 
-To pass through all environment variables, use `mode = "blocklist"` with an empty `block` list.
+To pass through all environment variables, use `mode = "default_allow"` with an empty `block` list.
 
 In all modes, `env.set` variables are always applied after filtering and override any inherited values.
 
@@ -694,13 +694,13 @@ Example policies:
 ```toml
 # Maximum security - only allow specific vars
 [policies.strict.env]
-mode = "allowlist"
+mode = "default_block"
 allow = ["PATH", "TERM"]
 set = { CAGE = "1" }
 
 # Exclude sensitive credentials only
 [policies.default.env]
-mode = "blocklist"
+mode = "default_allow"
 block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "AWS_*"]
 set = { CAGE = "1" }
 ```

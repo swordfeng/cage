@@ -298,7 +298,7 @@ mod tests {
         // Base policy: block SECRET, allow PATH
         let mut base: EnvPolicy = toml::from_str(
             r#"
-mode = "blocklist"
+mode = "default_allow"
 block = ["SECRET"]
 allow = ["PATH"]
 set = { BASE = "1" }
@@ -309,7 +309,7 @@ set = { BASE = "1" }
         // Other policy: block TOKEN, allow HOME
         let other: EnvPolicy = toml::from_str(
             r#"
-mode = "allowlist"
+mode = "default_block"
 block = ["TOKEN"]
 allow = ["HOME"]
 set = { OTHER = "2", BASE = "overridden" }
@@ -319,7 +319,7 @@ set = { OTHER = "2", BASE = "overridden" }
 
         base.merge(&other);
 
-        // Mode should be overridden to allowlist (DefaultBlock)
+        // Mode should be overridden to default_block (DefaultBlock)
         assert!(matches!(base.mode, Some(EnvMode::DefaultBlock)));
 
         // Filters should be prepended: other.filters come first, then base.filters
@@ -344,7 +344,7 @@ set = { OTHER = "2", BASE = "overridden" }
         // If other doesn't set mode, base mode should be preserved
         let mut base: EnvPolicy = toml::from_str(
             r#"
-mode = "allowlist"
+mode = "default_block"
 allow = ["PATH"]
 "#,
         )
@@ -359,7 +359,7 @@ allow = ["HOME"]
 
         base.merge(&other);
 
-        // Mode should still be allowlist (DefaultBlock) from base
+        // Mode should still be default_block (DefaultBlock) from base
         assert!(matches!(base.mode, Some(EnvMode::DefaultBlock)));
         // Filters should be prepended: HOME, PATH
         assert_eq!(base.filters.len(), 2);
@@ -371,7 +371,7 @@ allow = ["HOME"]
     fn test_env_policy_parsing() {
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "blocklist"
+mode = "default_allow"
 block = ["*_TOKEN", "SECRET"]
 allow = ["PATH", "HOME"]
 set = { CAGE = "1" }
@@ -405,7 +405,7 @@ set = { CAGE = "1" }
             env: Some(
                 toml::from_str::<EnvPolicy>(
                     r#"
-mode = "blocklist"
+mode = "default_allow"
 block = ["OLD"]
 "#,
                 )
@@ -423,7 +423,7 @@ block = ["OLD"]
             env: Some(
                 toml::from_str::<EnvPolicy>(
                     r#"
-mode = "allowlist"
+mode = "default_block"
 allow = ["PATH"]
 block = ["NEW"]
 set = { KEY = "value" }
@@ -499,7 +499,7 @@ set = { KEY = "value" }
             env: Some(
                 toml::from_str::<EnvPolicy>(
                     r#"
-mode = "blocklist"
+mode = "default_allow"
 allow = ["PATH"]
 "#,
                 )
@@ -517,7 +517,7 @@ allow = ["PATH"]
             env: Some(
                 toml::from_str::<EnvPolicy>(
                     r#"
-mode = "allowlist"
+mode = "default_block"
 "#,
                 )
                 .unwrap(),
@@ -535,7 +535,7 @@ mode = "allowlist"
         // Network should still be overridden (explicitly set to None)
         assert!(matches!(base.network, Some(NetworkPolicy::None)));
 
-        // Mode should be overridden to allowlist (DefaultBlock)
+        // Mode should be overridden to default_block (DefaultBlock)
         let env = base.env.as_ref().unwrap();
         assert!(matches!(env.mode, Some(EnvMode::DefaultBlock)));
     }

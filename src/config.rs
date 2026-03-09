@@ -247,9 +247,11 @@ mod tests {
         }
     }
 
-    /// Load config for tests without initializing user config (to avoid side effects)
-    fn load_test_config(args: &Args) -> Result<Config> {
-        load_config_internal(args, false)
+    /// Load config for tests - uses only bundled config to avoid side effects from local files
+    fn load_test_config(_args: &Args) -> Result<Config> {
+        // For tests, always use bundled config only to ensure consistent behavior
+        // regardless of local .cage.toml or user config files
+        toml::from_str(BUNDLED_CONFIG).context("failed to parse bundled config")
     }
 
     #[test]

@@ -419,7 +419,7 @@ mod tests {
         // Parse policy from TOML to get proper filter ordering
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "allowlist"
+mode = "default_block"
 allow = ["CAGE_TEST_PATH", "CAGE_TEST_H*"]
 set = { CAGE_TEST_EXTRA = "extra_value" }
 "#,
@@ -453,7 +453,7 @@ set = { CAGE_TEST_EXTRA = "extra_value" }
         // Parse policy from TOML to get proper filter ordering
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "blocklist"
+mode = "default_allow"
 block = ["*_TOKEN"]
 "#,
         )

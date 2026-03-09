@@ -255,7 +255,7 @@ mod tests {
         // Parse from TOML to get proper filter ordering
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "allowlist"
+mode = "default_block"
 allow = ["PATH"]
 "#,
         )
@@ -282,7 +282,7 @@ allow = ["PATH"]
         // Parse from TOML to get proper filter ordering
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "blocklist"
+mode = "default_allow"
 block = ["*_TOKEN", "*KEY"]
 "#,
         )
@@ -305,7 +305,7 @@ block = ["*_TOKEN", "*KEY"]
         // Parse from TOML
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "allowlist"
+mode = "default_block"
 allow = ["PATH"]
 set = { PATH = "/new", CAGE = "1" }
 "#,
@@ -329,7 +329,7 @@ set = { PATH = "/new", CAGE = "1" }
         // Parse from TOML
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "blocklist"
+mode = "default_allow"
 block = ["SECRET"]
 set = { CAGE = "1" }
 "#,
@@ -359,7 +359,7 @@ set = { CAGE = "1" }
         // Parse from TOML to get proper filter ordering
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "blocklist"
+mode = "default_allow"
 block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "AWS_*", "GITHUB_*"]
 set = { CAGE = "1" }
 "#,
@@ -390,7 +390,7 @@ set = { CAGE = "1" }
         // Parse from TOML to get proper filter ordering
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "allowlist"
+mode = "default_block"
 allow = ["PATH"]
 set = { CAGE = "1" }
 "#,
@@ -412,12 +412,12 @@ set = { CAGE = "1" }
             .into_iter()
             .collect();
 
-        // With allowlist mode and filters: block *_TOKEN, allow MY_TOKEN
+        // With default_block mode and filters: block *_TOKEN, allow MY_TOKEN
         // The block filter comes first (in TOML, block patterns are before allow)
         // So MY_TOKEN should be blocked
         let policy: EnvPolicy = toml::from_str(
             r#"
-mode = "allowlist"
+mode = "default_block"
 block = ["*_TOKEN"]
 allow = ["MY_TOKEN"]
 "#,
