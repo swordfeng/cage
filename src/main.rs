@@ -50,76 +50,22 @@ fn run(args: cli::Args) -> anyhow::Result<()> {
         "unknown"
     };
 
-    // Handle verbose output
-    if args.verbose {
-        eprintln!("Policy name: {}", policy_name);
-        eprintln!("Session temp dir: {}", session_tmpdir.display());
-        eprintln!("Platform backend: {}", platform_backend);
-        eprintln!("\nResolved policy:");
-        eprintln!("  Writable roots:");
-        for path in &policy.writable_roots {
-            eprintln!("    - {}", path.display());
-        }
-        eprintln!("  Write-restricted paths:");
-        for path in &policy.write_restricted_paths {
-            eprintln!("    - {}", path.display());
-        }
-        eprintln!("  Read-restricted paths:");
-        for path in &policy.read_restricted_paths {
-            eprintln!("    - {}", path.display());
-        }
-        eprintln!("  Network: {:?}", policy.network());
-        eprintln!("  Environment mode: {:?}", policy.env().mode());
+    // Print debug info if verbose or dry-run
+    let is_dry_run = args.dry_run;
+    if args.verbose || is_dry_run {
+        print_debug_info(
+            &policy,
+            &policy_name,
+            &session_tmpdir,
+            platform_backend,
+            &args.command,
+            &args.args,
+            is_dry_run,
+        );
     }
 
-    // Handle dry-run: print generated command/profile and exit
-    if args.dry_run {
-        println!("Sandbox configuration:");
-        println!("  Policy name: {}", policy_name);
-        println!("  Session temp dir: {}", session_tmpdir.display());
-        println!("  Platform backend: {}", platform_backend);
-        println!("  Writable roots: {:?}", policy.writable_roots);
-        println!("  Write restricted: {:?}", policy.write_restricted_paths);
-        println!("  Read restricted: {:?}", policy.read_restricted_paths);
-        println!("  Network: {:?}", policy.network());
-        println!("  Command: {}", args.command);
-        println!("  Args: {:?}", args.args);
-
-        // Show generated command/profile for the platform
-        println!("\nGenerated sandbox configuration:");
-        #[cfg(target_os = "linux")]
-        {
-            let argv = platform::linux::generate_bwrap_argv(
-                &policy,
-                &args.command,
-                &args.args,
-                &session_tmpdir,
-            );
-            println!("\nbwrap command:");
-            println!("  {}", argv.join(" "));
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let profile = platform::macos::generate_seatbelt_profile(
-                &policy,
-                &args.command,
-                &args.args,
-                &session_tmpdir,
-            );
-            println!("\nSeatbelt profile:");
-            println!("{}", profile);
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let config = platform::windows::generate_windows_sandbox_config(
-                &policy,
-                &args.command,
-                &args.args,
-                &session_tmpdir,
-            );
-            println!("\n{}", config);
-        }
-
+    // Handle dry-run: exit without executing
+    if is_dry_run {
         println!("\n(Dry run - not executing)");
         return Ok(());
     }
@@ -138,9 +84,144 @@ fn run(args: cli::Args) -> anyhow::Result<()> {
     }
 
     // Run command in sandbox
-    let exit_code = platform::run_sandboxed(&policy, &args.command, &args.args, &session_tmpdir)?;
+    let exit_code = platform::run_sandboxed(&policy, &args.command, &args.args, &session_tmpdir, args.verbose)?;
 
     process::exit(exit_code);
+}
+
+/// Print structured debug information for verbose/dry-run modes
+fn print_debug_info(
+    policy: &policy::types::SandboxPolicy,
+    policy_name: &str,
+    session_tmpdir: &PathBuf,
+    platform_backend: &str,
+    command: &str,
+    args: &[String],
+    use_stdout: bool,
+) {
+    let print = |msg: &str| {
+        if use_stdout {
+            println!("{}", msg);
+        } else {
+            eprintln!("{}", msg);
+        }
+    };
+
+    print("========================================");
+    print("Cage Sandbox Configuration");
+    print("========================================");
+    print(&format!("Policy name:        {}", policy_name));
+    print(&format!("Session temp dir:   {}", session_tmpdir.display()));
+    print(&format!("Platform backend:   {}", platform_backend));
+    print(&format!("Command:            {}", command));
+    if !args.is_empty() {
+        print(&format!("Arguments:          {:?}", args));
+    }
+    print("");
+
+    print("----------------------------------------");
+    print("Resolved Policy");
+    print("----------------------------------------");
+
+    // Network policy
+    print(&format!("network:            {:?}", policy.network()));
+    print("");
+
+    // Writable roots
+    print("writable_roots:");
+    if policy.writable_roots.is_empty() {
+        print("  (none)");
+    } else {
+        for path in &policy.writable_roots {
+            print(&format!("  - {}", path.display()));
+        }
+    }
+    print("");
+
+    // Write-restricted paths
+    print("write_restricted_paths:");
+    if policy.write_restricted_paths.is_empty() {
+        print("  (none)");
+    } else {
+        for path in &policy.write_restricted_paths {
+            print(&format!("  - {}", path.display()));
+        }
+    }
+    print("");
+
+    // Read-restricted paths
+    print("read_restricted_paths:");
+    if policy.read_restricted_paths.is_empty() {
+        print("  (none)");
+    } else {
+        for path in &policy.read_restricted_paths {
+            print(&format!("  - {}", path.display()));
+        }
+    }
+    print("");
+
+    // Environment policy
+    let env = policy.env();
+    print(&format!("env.mode:           {:?}", env.mode()));
+
+    // Print filters in precedence order (as stored in the Vec)
+    if !env.filters.is_empty() {
+        print("env.filters:");
+        for filter in &env.filters {
+            let action_str = match filter.action {
+                policy::types::FilterAction::Allow => "allow",
+                policy::types::FilterAction::Block => "block",
+            };
+            print(&format!("  - [{}] {}", action_str, filter.pattern));
+        }
+    }
+
+    if !env.set.is_empty() {
+        print("env.set:");
+        for (key, value) in &env.set {
+            print(&format!("  {}={}", key, value));
+        }
+    }
+    print("");
+
+    // Platform-specific generated configuration
+    print("----------------------------------------");
+    print("Generated Sandbox Command/Profile");
+    print("----------------------------------------");
+
+    #[cfg(target_os = "linux")]
+    {
+        let argv = platform::linux::generate_bwrap_argv(policy, command, args, session_tmpdir);
+        print("bwrap command:");
+        print(&format!("  bwrap --args <memfd> -- {} {}", command, args.join(" ")));
+        print("");
+        print("Arguments passed via memfd:");
+        print(&format!("  {}", argv[1..].join(" ")));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let profile =
+            platform::macos::generate_seatbelt_profile(policy, command, args, session_tmpdir);
+        print("Seatbelt profile:");
+        for line in profile.lines() {
+            print(&format!("  {}", line));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let config = platform::windows::generate_windows_sandbox_config(
+            policy,
+            command,
+            args,
+            session_tmpdir,
+        );
+        for line in config.lines() {
+            print(&format!("  {}", line));
+        }
+    }
+
+    print("");
+    print("========================================");
 }
 
 /// Create session temp directory with unique name

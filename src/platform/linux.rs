@@ -2,6 +2,7 @@ use crate::policy::types::{EnvPolicy, NetworkPolicy, SandboxPolicy};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::RawFd;
 use std::path::Path;
 use std::process::Command;
 
@@ -124,6 +125,117 @@ fn canonicalize_path(path: &Path) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
+/// Create a memfd with null-separated bwrap arguments
+fn create_args_memfd(args: &[String]) -> anyhow::Result<RawFd> {
+    use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+    use std::io::Seek;
+    use std::os::unix::io::IntoRawFd;
+
+    let fd = memfd_create(
+        c"bwrap-args",
+        MemFdCreateFlag::empty(),
+    )
+    .with_context(|| "failed to create memfd for bwrap arguments")?;
+
+    // Convert to std::fs::File for easier manipulation
+    let mut file = std::fs::File::from(fd);
+
+    // Write null-separated arguments
+    for arg in args {
+        std::io::Write::write_all(&mut file, arg.as_bytes())
+            .with_context(|| format!("failed to write argument to memfd: {}", arg))?;
+        std::io::Write::write_all(&mut file, &[0])
+            .with_context(|| "failed to write null separator to memfd")?;
+    }
+
+    // Seek back to start for reading
+    file.seek(std::io::SeekFrom::Start(0))
+        .with_context(|| "failed to seek memfd to start")?;
+
+    Ok(file.into_raw_fd())
+}
+
+/// Generate bwrap options (without "bwrap" binary and without command)
+fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<String> {
+    let mut options = Vec::new();
+
+    // Basic sandbox setup: --ro-bind / / first
+    options.push("--ro-bind".to_string());
+    options.push("/".to_string());
+    options.push("/".to_string());
+
+    // Device and proc filesystems
+    options.push("--dev".to_string());
+    options.push("/dev".to_string());
+
+    options.push("--proc".to_string());
+    options.push("/proc".to_string());
+
+    // Writable roots (in order)
+    for path in &policy.writable_roots {
+        if let Some(canonical) = canonicalize_path(path) {
+            options.push("--bind".to_string());
+            options.push(canonical.to_string_lossy().to_string());
+            options.push(canonical.to_string_lossy().to_string());
+        }
+    }
+
+    // Session temp dir
+    if let Some(canonical) = canonicalize_path(session_tmpdir) {
+        options.push("--bind".to_string());
+        options.push(canonical.to_string_lossy().to_string());
+        options.push(canonical.to_string_lossy().to_string());
+    }
+
+    // Write-restricted paths (read-only overlays - applied after writable roots)
+    for path in &policy.write_restricted_paths {
+        if let Some(canonical) = canonicalize_path(path) {
+            options.push("--ro-bind".to_string());
+            options.push(canonical.to_string_lossy().to_string());
+            options.push(canonical.to_string_lossy().to_string());
+        }
+    }
+
+    // Read-restricted paths (deny all access)
+    for path in &policy.read_restricted_paths {
+        if let Some(canonical) = canonicalize_path(path) {
+            let s = canonical.to_string_lossy().to_string();
+            if canonical.is_dir() {
+                options.push("--perms".to_string());
+                options.push("0000".to_string());
+                options.push("--tmpfs".to_string());
+                options.push(s.clone());
+                options.push("--remount-ro".to_string());
+                options.push(s);
+            } else {
+                options.push("--ro-bind".to_string());
+                options.push("/dev/null".to_string());
+                options.push(s);
+            }
+        }
+    }
+
+    // Network policy
+    match policy.network() {
+        NetworkPolicy::None => {
+            options.push("--unshare-net".to_string());
+        }
+        NetworkPolicy::Localhost => {
+            options.push("--share-net".to_string());
+        }
+        NetworkPolicy::Full => {
+            options.push("--share-net".to_string());
+        }
+    }
+
+    // Unshare PID and IPC namespaces; die with parent (always)
+    options.push("--unshare-pid".to_string());
+    options.push("--unshare-ipc".to_string());
+    options.push("--die-with-parent".to_string());
+
+    options
+}
+
 /// Generate the bubblewrap command line for dry-run display
 pub fn generate_bwrap_argv(
     policy: &SandboxPolicy,
@@ -132,86 +244,7 @@ pub fn generate_bwrap_argv(
     session_tmpdir: &Path,
 ) -> Vec<String> {
     let mut argv = vec!["bwrap".to_string()];
-
-    // Basic sandbox setup: --ro-bind / / first
-    argv.push("--ro-bind".to_string());
-    argv.push("/".to_string());
-    argv.push("/".to_string());
-
-    // Device and proc filesystems
-    argv.push("--dev".to_string());
-    argv.push("/dev".to_string());
-
-    argv.push("--proc".to_string());
-    argv.push("/proc".to_string());
-
-    // Writable roots (in order)
-    for path in &policy.writable_roots {
-        if let Some(canonical) = canonicalize_path(path) {
-            argv.push("--bind".to_string());
-            argv.push(canonical.to_string_lossy().to_string());
-            argv.push(canonical.to_string_lossy().to_string());
-        }
-    }
-
-    // Session temp dir
-    if let Some(canonical) = canonicalize_path(session_tmpdir) {
-        argv.push("--bind".to_string());
-        argv.push(canonical.to_string_lossy().to_string());
-        argv.push(canonical.to_string_lossy().to_string());
-    }
-
-    // Write-restricted paths (read-only overlays - applied after writable roots)
-    for path in &policy.write_restricted_paths {
-        if let Some(canonical) = canonicalize_path(path) {
-            argv.push("--ro-bind".to_string());
-            argv.push(canonical.to_string_lossy().to_string());
-            argv.push(canonical.to_string_lossy().to_string());
-        }
-    }
-
-    // Read-restricted paths (deny all access)
-    // Directories: --perms 0000 --tmpfs mounts a new empty filesystem with no permission
-    //   bits; --remount-ro prevents chmod from inside the sandbox bypassing the restriction.
-    // Files: --ro-bind /dev/null masks the file with a character device; inside bwrap's
-    //   user namespace the process lacks device access capabilities, so reads get EACCES.
-    for path in &policy.read_restricted_paths {
-        if let Some(canonical) = canonicalize_path(path) {
-            let s = canonical.to_string_lossy().to_string();
-            if canonical.is_dir() {
-                argv.push("--perms".to_string());
-                argv.push("0000".to_string());
-                argv.push("--tmpfs".to_string());
-                argv.push(s.clone());
-                argv.push("--remount-ro".to_string());
-                argv.push(s);
-            } else {
-                argv.push("--ro-bind".to_string());
-                argv.push("/dev/null".to_string());
-                argv.push(s);
-            }
-        }
-    }
-
-    // Network policy
-    match policy.network() {
-        NetworkPolicy::None => {
-            argv.push("--unshare-net".to_string());
-        }
-        NetworkPolicy::Localhost => {
-            // For localhost policy, we share network but will use seccomp in Phase 1b
-            argv.push("--share-net".to_string());
-        }
-        NetworkPolicy::Full => {
-            argv.push("--share-net".to_string());
-        }
-    }
-
-    // Unshare PID and IPC namespaces; die with parent (always)
-    // --unshare-ipc prevents sandbox from accessing host IPC (shared memory, semaphores)
-    argv.push("--unshare-pid".to_string());
-    argv.push("--unshare-ipc".to_string());
-    argv.push("--die-with-parent".to_string());
+    argv.extend(generate_bwrap_options(policy, session_tmpdir));
 
     // Command separator and the actual command
     argv.push("--".to_string());
@@ -226,19 +259,38 @@ pub fn run_sandboxed(
     command: &str,
     args: &[String],
     session_tmpdir: &Path,
+    verbose: bool,
 ) -> Result<i32> {
+    use std::os::unix::process::CommandExt;
+
     // Check prerequisites (bwrap availability and user namespace support)
     check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
 
     // Filter environment according to policy
     let filtered_env = filter_environment(policy.env());
 
-    // Build bwrap command
-    let bwrap_argv = generate_bwrap_argv(policy, command, args, session_tmpdir);
+    // Generate bwrap options (without bwrap binary and without command)
+    let bwrap_options = generate_bwrap_options(policy, session_tmpdir);
 
-    // Execute bwrap with filtered environment
-    let mut cmd = Command::new(&bwrap_argv[0]);
-    cmd.args(&bwrap_argv[1..]);
+    // Log full command for debugging if verbose mode
+    if verbose {
+        let full_argv = generate_bwrap_argv(policy, command, args, session_tmpdir);
+        eprintln!("[verbose] bwrap command (what would be passed via memfd):");
+        eprintln!("[verbose]   {}", full_argv.join(" "));
+    }
+
+    // Create memfd with bwrap arguments
+    let args_fd = create_args_memfd(&bwrap_options)
+        .with_context(|| "failed to create memfd for bwrap arguments")?;
+
+    // Build command: bwrap --args 10 -- <command> [args...]
+    // Use fd 10 to avoid conflicts with stdio (0, 1, 2) and any pipes Command might use
+    const BWRAP_ARGS_FD: i32 = 10;
+    
+    let mut cmd = Command::new("bwrap");
+    cmd.arg("--args").arg(BWRAP_ARGS_FD.to_string()).arg("--");
+    cmd.arg(command);
+    cmd.args(args);
 
     // Clear environment and set filtered values
     cmd.env_clear();
@@ -246,10 +298,26 @@ pub fn run_sandboxed(
         cmd.env(key, value);
     }
 
+    // Use pre_exec to setup fd before exec
+    unsafe {
+        cmd.pre_exec(move || {
+            use nix::unistd::{close, dup2};
+            // dup memfd to the fd bwrap will read from
+            dup2(args_fd, BWRAP_ARGS_FD).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("dup2 failed: {}", e))
+            })?;
+            // close original fd
+            close(args_fd).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("close failed: {}", e))
+            })?;
+            Ok(())
+        });
+    }
+
     // Execute and wait for completion
-    let status = cmd
-        .status()
-        .with_context(|| format!("failed to execute bwrap command: {:?}", bwrap_argv))?;
+    let status = cmd.status().with_context(|| {
+        "failed to execute bwrap command with memfd arguments"
+    })?;
 
     // Return exit code
     Ok(status.code().unwrap_or(1))

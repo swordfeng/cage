@@ -67,7 +67,7 @@ impl SandboxPolicy {
         static DEFAULT_ENV: std::sync::OnceLock<EnvPolicy> = std::sync::OnceLock::new();
         self.env.as_ref().unwrap_or_else(|| {
             DEFAULT_ENV.get_or_init(|| EnvPolicy {
-                mode: Some(EnvMode::Blocklist),
+                mode: Some(EnvMode::DefaultAllow),
                 filters: Vec::new(),
                 set: HashMap::new(),
             })
@@ -86,8 +86,14 @@ pub enum NetworkPolicy {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EnvMode {
-    Allowlist,
-    Blocklist,
+    /// Default to allowing environment variables (pass through by default)
+    /// Previously called "blocklist" - allows all, blocks only explicit patterns
+    #[serde(alias = "blocklist")]
+    DefaultAllow,
+    /// Default to blocking environment variables (filter by default)
+    /// Previously called "allowlist" - blocks all, allows only explicit patterns  
+    #[serde(alias = "allowlist")]
+    DefaultBlock,
 }
 
 /// A single environment variable filter with pattern and action
@@ -196,9 +202,9 @@ impl EnvPolicy {
         }
     }
 
-    /// Get mode, using Blocklist as default if not set
+    /// Get mode, using Allowlist as default if not set
     pub fn mode(&self) -> EnvMode {
-        self.mode.clone().unwrap_or(EnvMode::Blocklist)
+        self.mode.clone().unwrap_or(EnvMode::DefaultAllow)
     }
 }
 
@@ -362,8 +368,8 @@ set = { OTHER = "2", BASE = "overridden" }
 
         base.merge(&other);
 
-        // Mode should be overridden to allowlist
-        assert!(matches!(base.mode, Some(EnvMode::Allowlist)));
+        // Mode should be overridden to allowlist (DefaultBlock)
+        assert!(matches!(base.mode, Some(EnvMode::DefaultBlock)));
 
         // Filters should be prepended: other.filters come first, then base.filters
         // So: TOKEN(block), HOME(allow), SECRET(block), PATH(allow)
@@ -402,8 +408,8 @@ allow = ["HOME"]
 
         base.merge(&other);
 
-        // Mode should still be Allowlist from base
-        assert!(matches!(base.mode, Some(EnvMode::Allowlist)));
+        // Mode should still be allowlist (DefaultBlock) from base
+        assert!(matches!(base.mode, Some(EnvMode::DefaultBlock)));
         // Filters should be prepended: HOME, PATH
         assert_eq!(base.filters.len(), 2);
         assert_eq!(base.filters[0].pattern, "HOME");
@@ -422,7 +428,7 @@ set = { CAGE = "1" }
         )
         .unwrap();
 
-        assert!(matches!(policy.mode, Some(EnvMode::Blocklist)));
+        assert!(matches!(policy.mode, Some(EnvMode::DefaultAllow)));
         assert_eq!(policy.filters.len(), 4);
         // Block patterns come first
         assert_eq!(policy.filters[0].pattern, "*_TOKEN");
@@ -489,7 +495,7 @@ set = { KEY = "value" }
 
         // Env should be deep merged
         let env = base.env.as_ref().unwrap();
-        assert!(matches!(env.mode, Some(EnvMode::Allowlist)));
+        assert!(matches!(env.mode, Some(EnvMode::DefaultBlock)));
         // Filters should be prepended: NEW(block), PATH(allow), OLD(block)
         assert_eq!(env.filters.len(), 3);
         assert_eq!(env.filters[0].pattern, "NEW");
@@ -566,8 +572,8 @@ mode = "allowlist"
         // Network should still be overridden (explicitly set to None)
         assert!(matches!(base.network, Some(NetworkPolicy::None)));
 
-        // Mode should be overridden
+        // Mode should be overridden to allowlist (DefaultBlock)
         let env = base.env.as_ref().unwrap();
-        assert!(matches!(env.mode, Some(EnvMode::Allowlist)));
+        assert!(matches!(env.mode, Some(EnvMode::DefaultBlock)));
     }
 }

@@ -138,8 +138,8 @@ impl EnvPolicy {
             } else {
                 // No filter matched, use default mode
                 let should_include = match self.mode() {
-                    EnvMode::Allowlist => false, // Deny by default in allowlist mode
-                    EnvMode::Blocklist => true,  // Allow by default in blocklist mode
+                    EnvMode::DefaultAllow => true,  // Allow by default
+                    EnvMode::DefaultBlock => false, // Block by default
                 };
                 if should_include {
                     result.insert(key.clone(), value.clone());
@@ -439,7 +439,7 @@ allow = ["MY_TOKEN"]
             .collect();
 
         let policy = EnvPolicy {
-            mode: Some(EnvMode::Allowlist),
+            mode: Some(EnvMode::DefaultAllow),
             filters: vec![
                 crate::policy::types::EnvFilter {
                     pattern: "MY_TOKEN".to_string(),

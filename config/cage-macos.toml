@@ -10,7 +10,7 @@ enable_gui = true
 enable_audio = true
 
 [policies.default.env]
-mode = "blocklist"
+mode = "default_allow"
 block = ["*_TOKEN", "*_SECRET", "*_PASSWORD", "*_API_KEY", "AWS_*", "GITHUB_*"]
 set = { CAGE = "1" }
 
@@ -23,7 +23,7 @@ enable_gui = true
 enable_audio = true
 
 [policies.strict.env]
-mode = "allowlist"
+mode = "default_block"
 allow = ["PATH"]
 set = { CAGE = "1" }
 

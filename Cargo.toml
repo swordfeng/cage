@@ -13,6 +13,7 @@ scopeguard = "1.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 seccompiler = "0.4"
+nix = { version = "0.29", features = ["process", "fs"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = [
