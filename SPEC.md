@@ -278,8 +278,8 @@ pub struct SandboxPolicy {
     pub read_restricted_paths: Vec<PathBuf>,   // paths blocked from reading
     pub network: NetworkPolicy,
     pub env: EnvPolicy,
-    pub enable_gui: bool,                      // allow GUI display/audio passthrough (default: true)
-    pub enable_audio: bool,                    // allow audio passthrough (default: true)
+    pub enable_gui: bool,                      // allow GUI display/audio passthrough (default: false)
+    pub enable_audio: bool,                    // allow audio passthrough (default: false)
 }
 
 pub enum NetworkPolicy {
@@ -482,7 +482,7 @@ When GUI is enabled, the Seatbelt profile includes IOKit access rules:
 (allow device*)                         ; Input devices
 ```
 
-This allows the sandboxed process to communicate with the graphics subsystem (Metal, OpenGL) and access input devices. GUI passthrough is enabled by default; set `enable_gui = false` for headless environments.
+This allows the sandboxed process to communicate with the graphics subsystem (Metal, OpenGL) and access input devices. GUI passthrough is enabled by default in bundled configs; set `enable_gui = false` for headless environments.
 
 **Audio passthrough (`enable_audio = true`):**
 

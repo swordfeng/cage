@@ -83,23 +83,23 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] Run cage as subprocess via `Command`; check exit code forwarding
 
 ### T1.12 — GUI/Audio Policy Fields (`src/policy/types.rs`)
-- [ ] Add `enable_gui: Option<bool>` to `SandboxPolicy` struct
-- [ ] Add `enable_audio: Option<bool>` to `SandboxPolicy` struct
-- [ ] Update merge logic: override only if explicitly set (per SPEC §4.2 merge rules)
-- [ ] Add default getter methods: return `true` if field is `None`
-- [ ] Update bundled config `cage.toml` with `enable_gui = true` and `enable_audio = true` in both policies
+- [x] Add `enable_gui: Option<bool>` to `SandboxPolicy` struct
+- [x] Add `enable_audio: Option<bool>` to `SandboxPolicy` struct
+- [x] Update merge logic: override only if explicitly set (per SPEC §4.2 merge rules)
+- [x] Add default getter methods: return `false` if field is `None` (secure default; bundled configs set to `true`)
+- [x] Update bundled config `cage.toml` with `enable_gui = true` and `enable_audio = true` in both policies
 
 ### T1.13 — Linux GUI/Audio Passthrough (`src/platform/linux.rs`)
-- [ ] When `enable_gui` is true (default):
+- [x] When `enable_gui` is true (default):
   - Add `--ro-bind $XDG_RUNTIME_DIR/wayland-0 $XDG_RUNTIME_DIR/wayland-0` if Wayland socket exists
   - Add `--ro-bind /tmp/.X11-unix /tmp/.X11-unix` for X11 (read-only, sockets are writable in practice)
   - Add `--dev-bind /dev/dri /dev/dri` for GPU access (DRI/DRM)
   - **Do NOT add `--unshare-ipc`** (required for X11 shared memory extension)
-- [ ] When `enable_audio` is true (default):
+- [x] When `enable_audio` is true (default):
   - Add `--ro-bind $XDG_RUNTIME_DIR/pulse/native $XDG_RUNTIME_DIR/pulse/native` if PulseAudio socket exists
   - Add `--ro-bind $XDG_RUNTIME_DIR/pipewire-0 $XDG_RUNTIME_DIR/pipewire-0` if PipeWire socket exists
-- [ ] Update `generate_bwrap_argv` to accept GUI/audio flags and build appropriate bind mounts
-- [ ] Add `--dry-run` test to verify Wayland/X11/DRI binds appear when GUI enabled
+- [x] Update `generate_bwrap_argv` to accept GUI/audio flags and build appropriate bind mounts
+- [x] Add `--dry-run` test to verify Wayland/X11/DRI binds appear when GUI enabled
 
 ### T1.14 — macOS GUI/Audio Passthrough (`src/platform/macos.rs`)
 - [ ] When `enable_gui` is true (default):

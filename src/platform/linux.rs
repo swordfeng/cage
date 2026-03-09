@@ -96,6 +96,43 @@ fn canonicalize_path(path: &Path) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
+/// Get XDG_RUNTIME_DIR path
+/// Returns the environment variable if set, otherwise defaults to /run/user/<uid>
+fn get_xdg_runtime_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        let path = PathBuf::from(dir);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    // Fallback to /run/user/<uid>
+    let uid = nix::unistd::getuid().as_raw();
+    let path = PathBuf::from(format!("/run/user/{}", uid));
+    if path.exists() {
+        return Some(path);
+    }
+
+    None
+}
+
+/// Probe directory for entries matching a prefix and return matching paths
+fn probe_runtime_sockets(runtime_dir: &Path, prefix: &str) -> Vec<PathBuf> {
+    let mut sockets = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(runtime_dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with(prefix) {
+                    sockets.push(entry.path());
+                }
+            }
+        }
+    }
+
+    sockets
+}
+
 /// Create a memfd with null-separated bwrap arguments
 fn create_args_memfd(args: &[String]) -> anyhow::Result<RawFd> {
     use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
@@ -144,6 +181,13 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
 
     options.push("--tmpfs".to_string());
     options.push("/tmp".to_string());
+
+    // XDG_RUNTIME_DIR: mount as tmpfs (always, for isolation)
+    let xdg_runtime_dir = get_xdg_runtime_dir();
+    if let Some(ref runtime_dir) = xdg_runtime_dir {
+        options.push("--tmpfs".to_string());
+        options.push(runtime_dir.to_string_lossy().to_string());
+    }
 
     // Writable roots (in order)
     for path in &policy.writable_roots {
@@ -196,11 +240,48 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
         options.push("/dev/dri".to_string());
     }
 
+    // GUI access: Wayland sockets (probe wayland-* pattern)
+    if policy.enable_gui() {
+        if let Some(ref runtime_dir) = xdg_runtime_dir {
+            for socket_path in probe_runtime_sockets(runtime_dir, "wayland-") {
+                options.push("--ro-bind".to_string());
+                options.push(socket_path.to_string_lossy().to_string());
+                options.push(socket_path.to_string_lossy().to_string());
+            }
+        }
+
+        // X11: bind /tmp/.X11-unix (sockets are writable in practice)
+        if Path::new("/tmp/.X11-unix").exists() {
+            options.push("--ro-bind".to_string());
+            options.push("/tmp/.X11-unix".to_string());
+            options.push("/tmp/.X11-unix".to_string());
+        }
+    }
+
     // Audio access: ALSA sound devices
     if policy.enable_audio() && Path::new("/dev/snd").exists() {
         options.push("--dev-bind".to_string());
         options.push("/dev/snd".to_string());
         options.push("/dev/snd".to_string());
+    }
+
+    // Audio access: PulseAudio socket
+    if policy.enable_audio() {
+        if let Some(ref runtime_dir) = xdg_runtime_dir {
+            let pulse_socket = runtime_dir.join("pulse/native");
+            if pulse_socket.exists() {
+                options.push("--ro-bind".to_string());
+                options.push(pulse_socket.to_string_lossy().to_string());
+                options.push(pulse_socket.to_string_lossy().to_string());
+            }
+
+            // PipeWire sockets (probe pipewire-* pattern)
+            for socket_path in probe_runtime_sockets(runtime_dir, "pipewire-") {
+                options.push("--ro-bind".to_string());
+                options.push(socket_path.to_string_lossy().to_string());
+                options.push(socket_path.to_string_lossy().to_string());
+            }
+        }
     }
 
     // POSIX shared memory: always a private tmpfs so shm_open() works inside the
@@ -262,6 +343,9 @@ pub fn run_sandboxed(
     // Get the full path to bwrap binary from system global location
     let bwrap_path = check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
 
+    // Get XDG_RUNTIME_DIR for use in env setup
+    let xdg_runtime_dir = get_xdg_runtime_dir();
+
     // Filter environment according to policy, appending allow filters for GUI/audio vars.
     // Appended = lowest priority: explicit user filters earlier in the list still win.
     let mut ep = policy.env().clone();
@@ -283,7 +367,14 @@ pub fn run_sandboxed(
             ep.set.insert("TMPDIR".to_string(), canonical.to_string_lossy().to_string());
         }
     }
-    
+
+    // Set XDG_RUNTIME_DIR if not explicitly configured in env policy
+    if !ep.set.contains_key("XDG_RUNTIME_DIR") {
+        if let Some(ref runtime_dir) = xdg_runtime_dir {
+            ep.set.insert("XDG_RUNTIME_DIR".to_string(), runtime_dir.to_string_lossy().to_string());
+        }
+    }
+
     let filtered_env = filter_environment(&ep);
 
     // Generate bwrap options (without bwrap binary and without command)
