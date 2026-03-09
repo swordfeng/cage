@@ -280,8 +280,6 @@ pub fn run_sandboxed(
     session_tmpdir: &Path,
     verbose: bool,
 ) -> Result<i32> {
-    use std::os::unix::process::CommandExt;
-
     // Check prerequisites (bwrap availability and user namespace support)
     check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
 
@@ -312,15 +310,13 @@ pub fn run_sandboxed(
     }
 
     // Create memfd with bwrap arguments
+    // The returned fd will be inherited by bwrap (not CLOEXEC)
     let args_fd = create_args_memfd(&bwrap_options)
         .with_context(|| "failed to create memfd for bwrap arguments")?;
 
-    // Build command: bwrap --args 10 -- <command> [args...]
-    // Use fd 10 to avoid conflicts with stdio (0, 1, 2) and any pipes Command might use
-    const BWRAP_ARGS_FD: i32 = 10;
-    
+    // Build command: bwrap --args <fd> -- <command> [args...]
     let mut cmd = Command::new("bwrap");
-    cmd.arg("--args").arg(BWRAP_ARGS_FD.to_string()).arg("--");
+    cmd.arg("--args").arg(args_fd.to_string()).arg("--");
     cmd.arg(command);
     cmd.args(args);
 
@@ -330,29 +326,16 @@ pub fn run_sandboxed(
         cmd.env(key, value);
     }
 
-    // Use pre_exec to setup fd before exec
-    unsafe {
-        cmd.pre_exec(move || {
-            use nix::unistd::{close, dup2};
-            // dup memfd to the fd bwrap will read from
-            dup2(args_fd, BWRAP_ARGS_FD).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("dup2 failed: {}", e))
-            })?;
-            // close original fd
-            close(args_fd).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("close failed: {}", e))
-            })?;
-            Ok(())
-        });
-    }
-
     // Execute and wait for completion
     let status = cmd.status().with_context(|| {
         "failed to execute bwrap command with memfd arguments"
-    })?;
+    });
+
+    // Close the memfd in the parent process after spawn
+    let _ = nix::unistd::close(args_fd);
 
     // Return exit code
-    Ok(status.code().unwrap_or(1))
+    Ok(status?.code().unwrap_or(1))
 }
 
 #[cfg(test)]
