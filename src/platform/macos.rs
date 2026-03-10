@@ -149,77 +149,115 @@ fn sbpl_escape_path(path: &str) -> String {
     escaped
 }
 
+/// Static base SBPL profile - embedded at compile time
+const MACOS_BASE_PROFILE: &str = include_str!("macos_sandbox_base.sb");
+
 /// Build the complete Seatbelt profile (internal implementation)
+/// T1.16: Uses static base profile + dynamic policy rules
 fn build_seatbelt_profile(policy: &SandboxPolicy, session_tmpdir: &Path, _command: &str) -> String {
     let mut profile = String::new();
 
-    // Header
-    profile.push_str("(version 1)\n");
-    profile.push_str("(allow default)\n\n");
+    // ============================================
+    // 1. Base Profile (static)
+    // ============================================
+    profile.push_str(MACOS_BASE_PROFILE);
+    profile.push('\n');
 
     // ============================================
-    // Filesystem Write Restrictions
+    // 2. Session-Specific Temp Directory
     // ============================================
-    profile.push_str("; Filesystem write restrictions\n");
-    profile.push_str("(deny file-write* (subpath \"/\"))\n");
-
-    // Allow writes to session temp directory
     let tmpdir_escaped = sbpl_escape_path(&session_tmpdir.to_string_lossy());
+    profile.push_str("; Session temp directory\n");
     profile.push_str(&format!(
         "(allow file-write* (subpath \"{}\"))\n",
         tmpdir_escaped
     ));
-
-    // Allow writes to writable roots
-    for path in &policy.writable_roots {
-        match canonicalize_and_escape(path) {
-            Ok(escaped) => {
-                profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", escaped));
-            }
-            Err(e) => {
-                // Log warning but continue
-                verbose_warn!("{}", e);
-            }
-        }
-    }
-
-    // Deny writes to restricted paths (more specific subpath rules override less specific ones)
-    for path in &policy.write_restricted_paths {
-        let escaped = match canonicalize_and_escape(path) {
-            Ok(escaped) => escaped,
-            Err(e) => {
-                // For deny rules, fail secure: use raw path rather than dropping the restriction
-                verbose_warn!("{}; using raw path for deny rule", e);
-                sbpl_escape_path(&path.to_string_lossy())
-            }
-        };
-        profile.push_str(&format!("(deny file-write* (subpath \"{}\"))\n", escaped));
-    }
-
     profile.push('\n');
 
     // ============================================
-    // Read Restrictions
+    // 3. Writable Roots
     // ============================================
-    if !policy.read_restricted_paths.is_empty() {
-        profile.push_str("; Read restrictions\n");
-        for path in &policy.read_restricted_paths {
-            let escaped = match canonicalize_and_escape(path) {
-                Ok(escaped) => escaped,
+    if !policy.writable_roots.is_empty() {
+        profile.push_str("; Writable roots\n");
+        for path in &policy.writable_roots {
+            match canonicalize_and_escape(path) {
+                Ok(escaped) => {
+                    profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", escaped));
+                }
                 Err(e) => {
-                    // For deny rules, fail secure: use raw path rather than dropping the restriction
-                    verbose_warn!("{}; using raw path for deny rule", e);
-                    sbpl_escape_path(&path.to_string_lossy())
+                    verbose_warn!("{}", e);
                 }
             };
-            profile.push_str(&format!("(deny file-read* (subpath \"{}\"))\n", escaped));
         }
         profile.push('\n');
     }
 
     // ============================================
-    // Network Restrictions
+    // 4. Write Restrictions
     // ============================================
+    if !policy.write_restricted_paths.is_empty() {
+        profile.push_str("; Write restrictions\n");
+        for path in &policy.write_restricted_paths {
+            let escaped = match canonicalize_and_escape(path) {
+                Ok(escaped) => escaped,
+                Err(e) => {
+                    verbose_warn!("{}; using raw path for deny rule", e);
+                    sbpl_escape_path(&path.to_string_lossy())
+                }
+            };
+            profile.push_str(&format!("(deny file-write* (subpath \"{}\"))\n", escaped));
+        }
+        profile.push('\n');
+    }
+
+    // ============================================
+    // 5. Read Restrictions - BLOCKS ALL ACCESS
+    // These are the strongest restrictions, applied last
+    // ============================================
+
+    // 5a. Sensitive system paths
+    let sensitive_paths = [
+        "/private/var/db/SystemKey",
+        "/var/db/SystemKey",
+        "/private/var/db/ConfigurationProfiles/Store",
+        "/Library/Keychains",
+        "/private/var/db/KernelExtensionManagement",
+        "/var/db/KernelExtensionManagement",
+        "/private/var/db/dslocal/nodes/Default",
+    ];
+
+    profile.push_str("; Sensitive system paths - all access blocked\n");
+    for path in &sensitive_paths {
+        let escaped = sbpl_escape_path(path);
+        profile.push_str(&format!(
+            "(deny file-read* file-write* file-map-executable (subpath \"{}\"))\n",
+            escaped
+        ));
+    }
+
+    // 5b. User-specified read restrictions - BLOCKS ALL ACCESS
+    if !policy.read_restricted_paths.is_empty() {
+        profile.push('\n');
+        profile.push_str("; User-specified restricted paths - all access blocked\n");
+        for path in &policy.read_restricted_paths {
+            let escaped = match canonicalize_and_escape(path) {
+                Ok(escaped) => escaped,
+                Err(e) => {
+                    verbose_warn!("{}; using raw path for deny rule", e);
+                    sbpl_escape_path(&path.to_string_lossy())
+                }
+            };
+            profile.push_str(&format!(
+                "(deny file-read* file-write* file-map-executable (subpath \"{}\"))\n",
+                escaped
+            ));
+        }
+    }
+
+    // ============================================
+    // 5. Network Restrictions (dynamic)
+    // ============================================
+    profile.push('\n');
     profile.push_str("; Network restrictions\n");
     match policy.network() {
         NetworkPolicy::None => {
@@ -227,34 +265,52 @@ fn build_seatbelt_profile(policy: &SandboxPolicy, session_tmpdir: &Path, _comman
         }
         NetworkPolicy::Localhost => {
             profile.push_str("(deny network-outbound)\n");
-            profile.push_str("(allow network-outbound (remote ip \"localhost:*\"))\n");
+            profile.push_str("(deny network-inbound)\n");
+            profile.push_str("(allow network-outbound (remote ip-literal \"127.0.0.1:*\"))\n");
+            profile.push_str("(allow network-outbound (remote ip-literal \"[::1]:*\"))\n");
             profile.push_str("(allow network-outbound (remote unix-socket))\n");
         }
         NetworkPolicy::Full => {
-            profile.push_str("(allow network*)\n");
+            profile.push_str("(allow network-outbound)\n");
+            profile.push_str("(allow network-inbound)\n");
+            profile.push_str("(allow network-bind)\n");
         }
     }
-    profile.push('\n');
 
     // ============================================
-    // GUI Passthrough (T1.14)
+    // 6. GUI Support (dynamic)
     // ============================================
     if policy.enable_gui() {
-        profile.push_str("; GUI passthrough\n");
-        profile.push_str("(allow iokit-open)\n"); // GPU/display/Metal access
-        profile.push_str("(allow device*)\n"); // Input devices
         profile.push('\n');
+        profile.push_str("; GUI support - GPU/Metal/WindowServer\n");
+        profile.push_str("(allow iokit-open\n");
+        profile.push_str("  (iokit-user-client-class \"AGPMClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"AppleGraphicsControlClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"AppleGraphicsPolicyClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"AppleIntelMEUserClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"AppleMGPUPowerControlClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"AppleSNBFBUserClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"IOAccelerationUserClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"IOAccelerator\")\n");
+        profile.push_str("  (iokit-user-client-class \"IOFramebufferSharedUserClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"IOHIDParamUserClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"IOSurfaceRootUserClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"IOSurfaceSendRight\")\n");
+        profile.push_str("  (iokit-user-client-class \"RootDomainUserClient\")\n");
+        profile.push_str("  (iokit-user-client-class \"H11ANEInDirectPathClient\"))\n");
+        profile.push_str("(allow mach-lookup\n");
+        profile.push_str("  (global-name \"com.apple.CARenderServer\"))\n");
     }
 
     // ============================================
-    // Audio Passthrough (T1.14)
+    // 7. Audio Support (dynamic)
     // ============================================
-    // (allow device*) is needed for audio; if GUI is already enabled,
-    // it was emitted above, so only add it when GUI is off.
-    if policy.enable_audio() && !policy.enable_gui() {
-        profile.push_str("; Audio passthrough\n");
-        profile.push_str("(allow device*)\n");
+    if policy.enable_audio() {
         profile.push('\n');
+        profile.push_str("; Audio support - CoreAudio via Mach services\n");
+        profile.push_str("(allow mach-lookup\n");
+        profile.push_str("  (global-name \"com.apple.audio.audiohald\")\n");
+        profile.push_str("  (global-name \"com.apple.audio.coreaudiod\"))\n");
     }
 
     profile
@@ -361,19 +417,20 @@ mod tests {
         let tmpdir = Path::new("/tmp/cage-test");
         let profile = build_seatbelt_profile(&policy, tmpdir, "/bin/sh");
 
-        // Both deny rules should be present even though paths don't exist
+        // Write-restricted: only blocks writes
         assert!(
             profile.contains("(deny file-write* (subpath \"/nonexistent/restricted/path\"))"),
             "write-restricted deny rule should use raw path as fallback"
         );
+        // Read-restricted: blocks ALL access (read + write + executable)
         assert!(
-            profile.contains("(deny file-read* (subpath \"/nonexistent/secret/path\"))"),
-            "read-restricted deny rule should use raw path as fallback"
+            profile.contains("(deny file-read* file-write* file-map-executable (subpath \"/nonexistent/secret/path\"))"),
+            "read-restricted deny rule should block all access and use raw path as fallback"
         );
     }
 
     #[test]
-    fn test_audio_only_emits_device_rule() {
+    fn test_audio_only_emits_mach_services() {
         let mut policy = SandboxPolicy::default();
         policy.enable_audio = Some(true);
         policy.enable_gui = Some(false);
@@ -381,12 +438,16 @@ mod tests {
         let tmpdir = Path::new("/tmp/cage-test");
         let profile = build_seatbelt_profile(&policy, tmpdir, "/bin/sh");
 
-        assert!(profile.contains("; Audio passthrough\n(allow device*)\n"));
-        assert!(!profile.contains("; GUI passthrough"));
+        // T1.16: Audio uses Mach services instead of device wildcard
+        assert!(profile.contains("; Audio support - CoreAudio via Mach services"));
+        assert!(profile.contains("com.apple.audio.audiohald"));
+        assert!(profile.contains("com.apple.audio.coreaudiod"));
+        assert!(!profile.contains("(allow device*)"));
+        assert!(!profile.contains("; GUI support"));
     }
 
     #[test]
-    fn test_gui_and_audio_no_duplicate_device_rule() {
+    fn test_gui_and_audio_no_device_wildcard() {
         let mut policy = SandboxPolicy::default();
         policy.enable_gui = Some(true);
         policy.enable_audio = Some(true);
@@ -394,11 +455,16 @@ mod tests {
         let tmpdir = Path::new("/tmp/cage-test");
         let profile = build_seatbelt_profile(&policy, tmpdir, "/bin/sh");
 
-        // (allow device*) should appear exactly once (from GUI section)
-        let count = profile.matches("(allow device*)").count();
-        assert_eq!(count, 1, "device rule should appear exactly once");
-        // Should not have an empty audio section
-        assert!(!profile.contains("; Audio passthrough"));
+        // T1.16: Neither GUI nor Audio should use (allow device*)
+        assert!(
+            !profile.contains("(allow device*)"),
+            "should not use device wildcard"
+        );
+        // GUI should have specific IOKit classes
+        assert!(profile.contains("; GUI support - GPU/Metal/WindowServer"));
+        assert!(profile.contains("com.apple.CARenderServer"));
+        // Audio should have Mach services
+        assert!(profile.contains("com.apple.audio.audiohald"));
     }
 
     #[test]

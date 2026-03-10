@@ -120,8 +120,31 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] Update `generate_windows_sandbox_config` to log when these flags are set (for visibility in `--dry-run`)
 
 ### T1.16 — Refine macOS Seatbelt sandbox rules
-- [ ] Review and refine Seatbelt profile to use exact operations instead of wildcards where possible
-- [ ] Reference Codex Seatbelt implementation: `openai/codex/codex-rs/core/src/seatbelt.rs`
+- [x] Review and refine Seatbelt profile to use exact operations instead of wildcards where possible
+- [x] Reference Codex Seatbelt implementation: `openai/codex/codex-rs/core/src/seatbelt.rs`
+
+**Implemented:**
+- Split profile into static base (`macos_base.sb`) and dynamic generation
+- Static base includes:
+  - `(deny default)` security-first approach
+  - Process operations (fork, exec, signal, process-info)
+  - Sysctl read permissions
+  - System read access: `(allow file-read* file-map-executable (subpath "/"))`
+  - PTY support for interactive shells
+  - IPC semaphores for Python multiprocessing
+  - Comprehensive Mach services allow-list (logging, prefs, user info, security, analytics)
+- Dynamic generation order (matching Linux semantics):
+  1. Temp directory writes (base has read, policy adds write)
+  2. Writable roots (allow file-write*)
+  3. Write restrictions (deny file-write*)
+  4. Read restrictions - **BLOCKS ALL ACCESS** (deny file-read* file-write* file-map-executable)
+     - Includes both sensitive system paths and user-specified `read_restricted_paths`
+     - **Semantic change**: read_restricted_paths now blocks read + write + executable mapping
+  5. Network restrictions (dynamic)
+  6. GUI support - specific IOKit classes (AGPMClient, IOAccelerator, etc.) + WindowServer
+  7. Audio support - CoreAudio Mach services (audiohald, coreaudiod) - no device wildcard
+- No wildcards for device or IOKit access - all specific classes/services
+- Updated tests to verify new implementation and semantic changes
 
 ---
 

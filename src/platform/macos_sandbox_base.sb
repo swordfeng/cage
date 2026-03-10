@@ -1,0 +1,66 @@
+(version 1)
+(deny default)
+(import "system.sb")
+
+; Process operations
+(allow process-exec)
+(allow process-fork)
+(allow signal (target same-sandbox))
+(allow process-info* (target same-sandbox))
+
+; IPC
+; Design note: allow-all + blocklist approach for Mach/IPC.
+; This ensures compatibility by default, while the deny rules below block
+; the highest-risk services. Unlisted XPC services remain accessible —
+; this is an acknowledged Phase 1 tradeoff documented in T1.16.
+(allow mach* ipc-posix*)
+(deny mach-register (global-name-prefix "com.apple."))
+
+; Block dangerous mach services
+(deny mach-lookup
+  ; Task port access - can read/write arbitrary process memory
+  (global-name "com.apple.taskgated")
+  (global-name "com.apple.taskgated-helper")
+
+  ; Security policy modification
+  (global-name "com.apple.security.syspolicy")
+
+  ; Auth agents - credential phishing / privilege escalation
+  (global-name "com.apple.security.agent")
+  (global-name "com.apple.security.agent.login")
+  (global-name "com.apple.security.authhost")
+
+  ; Arbitrary command execution via storage
+  (global-name "com.apple.storagekitfsrunner")
+
+  ; Arbitrary file access bypass
+  (global-name "com.apple.WorkflowKit.ShortcutsFileAccessHelper")
+
+  ; Disk mount/unmount
+  (global-name "com.apple.DiskArbitration.diskarbitrationd")
+
+  ; System sleep/shutdown/power
+  (global-name "com.apple.powerd")
+  (global-name "com.apple.powerd.swd")
+
+  ; Direct (non-session) WindowServer — session-specific .active is still allowed
+  (global-name "com.apple.WindowServer")
+
+  ; XPC privileged helpers - general catch for known dangerous pattern
+  (global-name "com.apple.xpc.activity2")
+)
+
+; System information reads
+(allow sysctl-read)
+
+; Filesystem read access - allow all reads, restrictions applied dynamically
+(allow file-read* file-map-executable (subpath "/"))
+
+; PTY support for interactive shells
+(allow pseudo-tty)
+(allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+(allow file-read* file-write*
+  (require-all
+    (regex #"^/dev/ttys[0-9]+")
+    (extension "com.apple.sandbox.pty")))
+(allow file-ioctl (regex #"^/dev/ttys[0-9]+"))
