@@ -9,11 +9,15 @@ use std::process;
 
 mod cli;
 mod config;
+mod log;
 mod platform;
 mod policy;
 
 fn main() {
     let args = cli::Args::parse();
+
+    // Set global verbose flag
+    log::set_verbose(args.verbose || args.dry_run);
 
     match run(args) {
         Ok(exit_code) => process::exit(exit_code),
@@ -32,7 +36,7 @@ fn run(args: cli::Args) -> anyhow::Result<i32> {
     let policy_name = config::resolve_policy_name(&cfg, &args)?;
 
     // Resolve the policy (applies CLI overrides and variable expansion)
-    let policy = config::resolve_policy(&cfg, &args, args.verbose)?;
+    let policy = config::resolve_policy(&cfg, &args)?;
 
     // Create session temp directory early for verbose/dry-run display
     let session_tmpdir = create_session_tmpdir()?;

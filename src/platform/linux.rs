@@ -1,4 +1,5 @@
 use crate::policy::types::{EnvFilter, EnvPolicy, FilterAction, NetworkPolicy, SandboxPolicy};
+use crate::verbose_warn;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
@@ -285,9 +286,9 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
             options.push("--unshare-net".to_string());
         }
         NetworkPolicy::Localhost => {
-            eprintln!("[cage] warning: 'localhost' network policy is not yet enforced; \
-                       sandboxed process has full network access (same as 'full'). \
-                       Seccomp-based filtering is planned for Phase 1b.");
+            verbose_warn!("'localhost' network policy is not yet enforced; "
+                       "sandboxed process has full network access (same as 'full'). "
+                       "Seccomp-based filtering is planned for Phase 1b.");
             options.push("--share-net".to_string());
         }
         NetworkPolicy::Full => {

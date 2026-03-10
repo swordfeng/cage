@@ -119,6 +119,10 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [ ] Add documentation comment explaining Windows inherently supports GUI/audio, flags are for config compatibility
 - [ ] Update `generate_windows_sandbox_config` to log when these flags are set (for visibility in `--dry-run`)
 
+### T1.16 — Refine macOS Seatbelt sandbox rules
+- [ ] Review and refine Seatbelt profile to use exact operations instead of wildcards where possible
+- [ ] Reference Codex Seatbelt implementation: `openai/codex/codex-rs/core/src/seatbelt.rs`
+
 ---
 
 ## Phase 1b — Windows + Localhost Network (Weeks 4–5)

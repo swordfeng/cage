@@ -1,4 +1,5 @@
 use crate::policy::types::{EnvPolicy, NetworkPolicy, SandboxPolicy};
+use crate::verbose_warn;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::Path;
@@ -154,7 +155,7 @@ fn build_seatbelt_profile(
             }
             Err(e) => {
                 // Log warning but continue
-                eprintln!("Warning: {}", e);
+                verbose_warn!("{}", e);
             }
         }
     }
@@ -165,7 +166,7 @@ fn build_seatbelt_profile(
             Ok(escaped) => escaped,
             Err(e) => {
                 // For deny rules, fail secure: use raw path rather than dropping the restriction
-                eprintln!("Warning: {}; using raw path for deny rule", e);
+                verbose_warn!("{}; using raw path for deny rule", e);
                 sbpl_escape_path(&path.to_string_lossy())
             }
         };
@@ -184,7 +185,7 @@ fn build_seatbelt_profile(
                 Ok(escaped) => escaped,
                 Err(e) => {
                     // For deny rules, fail secure: use raw path rather than dropping the restriction
-                    eprintln!("Warning: {}; using raw path for deny rule", e);
+                    verbose_warn!("{}; using raw path for deny rule", e);
                     sbpl_escape_path(&path.to_string_lossy())
                 }
             };
@@ -294,7 +295,10 @@ mod tests {
         );
 
         // Control character escaping (prevents SBPL injection)
-        assert_eq!(sbpl_escape_path("/tmp/with\nnewline"), "/tmp/with\\nnewline");
+        assert_eq!(
+            sbpl_escape_path("/tmp/with\nnewline"),
+            "/tmp/with\\nnewline"
+        );
         assert_eq!(sbpl_escape_path("/tmp/with\0null"), "/tmp/with\\0null");
     }
 

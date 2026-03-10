@@ -127,7 +127,7 @@ pub fn resolve_policy_name(config: &Config, args: &Args) -> Result<String> {
 
 /// Resolve the final policy, applying CLI overrides and variable expansion.
 /// This is the primary API for callers that need a ready-to-use policy.
-pub fn resolve_policy(config: &Config, args: &Args, verbose: bool) -> Result<SandboxPolicy> {
+pub fn resolve_policy(config: &Config, args: &Args) -> Result<SandboxPolicy> {
     let name = resolve_policy_name(config, args)?;
     let mut policy = config.get_policy(&name)?.clone();
 
@@ -148,9 +148,9 @@ pub fn resolve_policy(config: &Config, args: &Args, verbose: bool) -> Result<San
     let cwd = env::current_dir().context("failed to get current working directory")?;
 
     // Expand variables in all path fields
-    policy.writable_roots = expand_paths(&policy.writable_roots, &cwd, verbose);
-    policy.write_restricted_paths = expand_paths(&policy.write_restricted_paths, &cwd, verbose);
-    policy.read_restricted_paths = expand_paths(&policy.read_restricted_paths, &cwd, verbose);
+    policy.writable_roots = expand_paths(&policy.writable_roots, &cwd);
+    policy.write_restricted_paths = expand_paths(&policy.write_restricted_paths, &cwd);
+    policy.read_restricted_paths = expand_paths(&policy.read_restricted_paths, &cwd);
 
     Ok(policy)
 }
@@ -158,7 +158,7 @@ pub fn resolve_policy(config: &Config, args: &Args, verbose: bool) -> Result<San
 /// Expand variables in a list of paths.
 /// Drops paths that fail to expand (e.g., unset environment variables).
 /// Logs dropped paths at verbose level.
-fn expand_paths(paths: &[PathBuf], cwd: &Path, verbose: bool) -> Vec<PathBuf> {
+fn expand_paths(paths: &[PathBuf], cwd: &Path) -> Vec<PathBuf> {
     paths
         .iter()
         .filter_map(|path| {
@@ -166,12 +166,7 @@ fn expand_paths(paths: &[PathBuf], cwd: &Path, verbose: bool) -> Vec<PathBuf> {
             match expand_path(&path_str, cwd) {
                 Some(expanded) => Some(expanded),
                 None => {
-                    if verbose {
-                        eprintln!(
-                            "Warning: Dropping path with unset variable: {}",
-                            path.display()
-                        );
-                    }
+                    crate::verbose_warn!("Dropping path with unset variable: {}", path.display());
                     None
                 }
             }
@@ -334,7 +329,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = resolve_policy(&config, &args, false).unwrap();
+        let policy = resolve_policy(&config, &args).unwrap();
 
         // Should include the extra writable path
         assert!(policy
@@ -354,7 +349,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = resolve_policy(&config, &args, false).unwrap();
+        let policy = resolve_policy(&config, &args).unwrap();
 
         // allow_network should override to Full
         assert!(matches!(policy.network, Some(NetworkPolicy::Full)));
@@ -369,7 +364,7 @@ mod tests {
         };
 
         let config = load_test_config(&args).unwrap();
-        let policy = resolve_policy(&config, &args, false).unwrap();
+        let policy = resolve_policy(&config, &args).unwrap();
 
         assert!(policy
             .writable_roots
