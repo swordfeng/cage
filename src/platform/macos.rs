@@ -44,7 +44,17 @@ pub fn run_sandboxed(
     let read_fd_num = read_fd.as_raw_fd();
 
     // 5. Build filtered environment
-    let filtered_env = filter_environment(policy.env());
+    let mut ep = policy.env().clone();
+
+    // Set TMPDIR to session_tmpdir if not explicitly configured in env policy
+    if !ep.set.contains_key("TMPDIR") {
+        ep.set.insert(
+            "TMPDIR".to_string(),
+            canonical_tmpdir.to_string_lossy().to_string(),
+        );
+    }
+
+    let filtered_env = filter_environment(&ep);
 
     // 6. Execute with sandbox-exec using /dev/fd for the profile
     let mut cmd = Command::new(SANDBOX_EXEC_PATH);
