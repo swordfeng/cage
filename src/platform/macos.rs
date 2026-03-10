@@ -2,6 +2,9 @@ use crate::policy::types::{EnvPolicy, NetworkPolicy, SandboxPolicy};
 use crate::verbose_warn;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::io::Write;
+use std::os::fd::IntoRawFd;
+use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -23,29 +26,30 @@ pub fn run_sandboxed(
     let canonical_tmpdir =
         std::fs::canonicalize(session_tmpdir).unwrap_or_else(|_| session_tmpdir.to_path_buf());
 
-    // 3. Determine profile path and canonicalize it
-    let profile_path = canonical_tmpdir.join("cage.sb");
+    // 3. Generate the Seatbelt profile (profile passed via pipe, no file path needed)
+    let profile = build_seatbelt_profile(policy, &canonical_tmpdir, command);
 
-    // 4. Generate and write the Seatbelt profile
-    let profile = build_seatbelt_profile(policy, &canonical_tmpdir, &profile_path, command);
-    std::fs::write(&profile_path, profile).with_context(|| {
-        format!(
-            "failed to write Seatbelt profile to {}",
-            profile_path.display()
-        )
-    })?;
+    // 4. Create a pipe for passing the profile to sandbox-exec
+    let (read_fd, write_fd) =
+        nix::unistd::pipe().context("failed to create pipe for Seatbelt profile")?;
 
-    if verbose {
-        eprintln!("Seatbelt profile written to: {}", profile_path.display());
-    }
+    // Set CLOEXEC on write end so it doesn't leak to the inner program
+    // (sandbox-exec will read the profile, then exec the child which shouldn't have it)
+    nix::fcntl::fcntl(
+        write_fd.as_raw_fd(),
+        nix::fcntl::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+    )?;
+
+    // Get raw fd numbers for formatting
+    let read_fd_num = read_fd.as_raw_fd();
 
     // 5. Build filtered environment
     let filtered_env = filter_environment(policy.env());
 
-    // 6. Execute with sandbox-exec
+    // 6. Execute with sandbox-exec using /dev/fd for the profile
     let mut cmd = Command::new(SANDBOX_EXEC_PATH);
     cmd.arg("-f")
-        .arg(&profile_path)
+        .arg(format!("/dev/fd/{}", read_fd_num))
         .arg("--")
         .arg(command)
         .args(args)
@@ -55,21 +59,35 @@ pub fn run_sandboxed(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
 
-    if verbose {
-        eprintln!(
-            "Executing: {} -f {} -- {} {:?}",
-            SANDBOX_EXEC_PATH,
-            profile_path.display(),
-            command,
-            args
-        );
-    }
-
-    // 7. Run and forward exit code
+    // Pass the read end of the pipe to the child process (don't close it in parent yet)
+    // We need to spawn first, then close in parent
     let mut child = cmd
         .spawn()
         .with_context(|| format!("failed to spawn sandbox-exec for command: {}", command))?;
 
+    // Close the read end in the parent process after spawn
+    // The fd is inherited by sandbox-exec via fork() (no CLOEXEC on read end - needed for reading)
+    // Note: There's a minor fd leak to the inner program - the read-end fd may
+    // remain open in the sandboxed process. Write end has CLOEXEC set. Low risk (read-only, EOF).
+    drop(read_fd);
+
+    // 7. Write profile to the pipe in a separate thread
+    // This allows sandbox-exec to consume the profile as we write it
+    std::thread::spawn(move || {
+        let mut file = unsafe { std::fs::File::from_raw_fd(write_fd.into_raw_fd()) };
+        // Write profile; ignore BrokenPipe errors (sandbox-exec may exit early)
+        let _ = file.write_all(profile.as_bytes());
+        // write_fd closes when file is dropped
+    });
+
+    if verbose {
+        eprintln!(
+            "Executing: {} -f /dev/fd/{} -- {} {:?}",
+            SANDBOX_EXEC_PATH, read_fd_num, command, args
+        );
+    }
+
+    // 8. Wait for sandbox-exec to finish
     let status = child
         .wait()
         .context("failed to wait for sandboxed process")?;
@@ -122,12 +140,7 @@ fn sbpl_escape_path(path: &str) -> String {
 }
 
 /// Build the complete Seatbelt profile (internal implementation)
-fn build_seatbelt_profile(
-    policy: &SandboxPolicy,
-    session_tmpdir: &Path,
-    profile_path: &Path,
-    _command: &str,
-) -> String {
+fn build_seatbelt_profile(policy: &SandboxPolicy, session_tmpdir: &Path, _command: &str) -> String {
     let mut profile = String::new();
 
     // Header
@@ -195,21 +208,6 @@ fn build_seatbelt_profile(
     }
 
     // ============================================
-    // Profile File Protection
-    // ============================================
-    profile.push_str("; Deny access to the profile file itself\n");
-    let profile_escaped = sbpl_escape_path(&profile_path.to_string_lossy());
-    profile.push_str(&format!(
-        "(deny file-read* (literal \"{}\"))\n",
-        profile_escaped
-    ));
-    profile.push_str(&format!(
-        "(deny file-write* (literal \"{}\"))\n",
-        profile_escaped
-    ));
-    profile.push('\n');
-
-    // ============================================
     // Network Restrictions
     // ============================================
     profile.push_str("; Network restrictions\n");
@@ -272,8 +270,7 @@ pub fn generate_seatbelt_profile(
     // Canonicalize to match run_sandboxed behavior (e.g., /tmp -> /private/tmp)
     let canonical_tmpdir =
         std::fs::canonicalize(session_tmpdir).unwrap_or_else(|_| session_tmpdir.to_path_buf());
-    let profile_placeholder = canonical_tmpdir.join("cage.sb");
-    build_seatbelt_profile(policy, &canonical_tmpdir, &profile_placeholder, _command)
+    build_seatbelt_profile(policy, &canonical_tmpdir, _command)
 }
 
 #[cfg(test)]
@@ -345,20 +342,6 @@ mod tests {
     }
 
     #[test]
-    fn test_profile_file_uses_literal_matcher() {
-        let policy = SandboxPolicy::default();
-        let tmpdir = Path::new("/tmp/cage-test");
-        let profile_path = tmpdir.join("cage.sb");
-        let profile = build_seatbelt_profile(&policy, tmpdir, &profile_path, "/bin/sh");
-
-        // Profile file protection should use 'literal' (for a single file), not 'subpath'
-        assert!(profile.contains("(deny file-read* (literal \"/tmp/cage-test/cage.sb\"))"));
-        assert!(profile.contains("(deny file-write* (literal \"/tmp/cage-test/cage.sb\"))"));
-        // Should NOT use subpath for the profile file
-        assert!(!profile.contains("(deny file-read* (subpath \"/tmp/cage-test/cage.sb\"))"));
-    }
-
-    #[test]
     fn test_deny_rules_use_raw_path_on_canonicalize_failure() {
         // If a restricted path doesn't exist, the raw path should still appear as a deny rule
         let mut policy = SandboxPolicy::default();
@@ -366,8 +349,7 @@ mod tests {
         policy.read_restricted_paths = vec![PathBuf::from("/nonexistent/secret/path")];
 
         let tmpdir = Path::new("/tmp/cage-test");
-        let profile_path = tmpdir.join("cage.sb");
-        let profile = build_seatbelt_profile(&policy, tmpdir, &profile_path, "/bin/sh");
+        let profile = build_seatbelt_profile(&policy, tmpdir, "/bin/sh");
 
         // Both deny rules should be present even though paths don't exist
         assert!(
@@ -387,8 +369,7 @@ mod tests {
         policy.enable_gui = Some(false);
 
         let tmpdir = Path::new("/tmp/cage-test");
-        let profile_path = tmpdir.join("cage.sb");
-        let profile = build_seatbelt_profile(&policy, tmpdir, &profile_path, "/bin/sh");
+        let profile = build_seatbelt_profile(&policy, tmpdir, "/bin/sh");
 
         assert!(profile.contains("; Audio passthrough\n(allow device*)\n"));
         assert!(!profile.contains("; GUI passthrough"));
@@ -401,8 +382,7 @@ mod tests {
         policy.enable_audio = Some(true);
 
         let tmpdir = Path::new("/tmp/cage-test");
-        let profile_path = tmpdir.join("cage.sb");
-        let profile = build_seatbelt_profile(&policy, tmpdir, &profile_path, "/bin/sh");
+        let profile = build_seatbelt_profile(&policy, tmpdir, "/bin/sh");
 
         // (allow device*) should appear exactly once (from GUI section)
         let count = profile.matches("(allow device*)").count();

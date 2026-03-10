@@ -201,7 +201,7 @@ fn print_debug_info(
     {
         let profile =
             platform::macos::generate_seatbelt_profile(policy, command, args, session_tmpdir);
-        print("Seatbelt profile:");
+        print("Seatbelt profile (passed via /dev/fd/X pipe):");
         for line in profile.lines() {
             print(&format!("  {}", line));
         }
