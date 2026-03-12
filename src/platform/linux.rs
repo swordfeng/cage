@@ -160,6 +160,11 @@ fn create_args_memfd(args: &[String]) -> anyhow::Result<RawFd> {
 /// Generate bwrap options (without "bwrap" binary and without command)
 fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<String> {
     let mut options = Vec::new();
+    
+    // Unshare PID and IPC namespaces; die with parent (always)
+    options.push("--unshare-pid".to_string());
+    options.push("--unshare-ipc".to_string());
+    options.push("--die-with-parent".to_string());
 
     // Basic sandbox setup: --ro-bind / / first
     options.push("--ro-bind".to_string());
@@ -297,11 +302,6 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
             options.push("--share-net".to_string());
         }
     }
-
-    // Unshare PID and IPC namespaces; die with parent (always)
-    options.push("--unshare-pid".to_string());
-    options.push("--unshare-ipc".to_string());
-    options.push("--die-with-parent".to_string());
 
     options
 }
