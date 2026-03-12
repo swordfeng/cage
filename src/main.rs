@@ -202,6 +202,7 @@ fn print_debug_info(
             args,
             session_tmpdir,
             &bwrap_path,
+            None, // no restricted xauth in dry-run mode
         );
         print("bwrap command:");
         print(&format!(

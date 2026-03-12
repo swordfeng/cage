@@ -113,6 +113,51 @@ fn get_xdg_runtime_dir() -> PathBuf {
     return path;
 }
 
+/// Find xauth binary in standard system locations
+fn find_xauth_binary() -> Option<PathBuf> {
+    for path in &[
+        "/usr/bin/xauth",
+        "/bin/xauth",
+        "/usr/X11R6/bin/xauth",
+        "/usr/local/bin/xauth",
+    ] {
+        let p = Path::new(path);
+        if p.exists() {
+            return Some(p.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Try to generate a restricted (untrusted) X11 auth token using the X11 Security extension.
+///
+/// Uses `xauth generate <display> . untrusted timeout 3600` to create a token that
+/// restricts key grabs, input sniffing, and other sensitive operations inside the sandbox.
+/// Returns the path to the generated xauth file, or None if xauth is unavailable or the
+/// X11 Security extension is not supported by the running X server.
+fn try_generate_restricted_xauth(display: &str, session_tmpdir: &Path) -> Option<PathBuf> {
+    let xauth_bin = find_xauth_binary()?;
+    let xauth_file = session_tmpdir.join(".xauth");
+
+    let output = Command::new(&xauth_bin)
+        .arg("-f")
+        .arg(&xauth_file)
+        .arg("generate")
+        .arg(display)
+        .arg(".")
+        .arg("untrusted")
+        .arg("timeout")
+        .arg("3600")
+        .output()
+        .ok()?;
+
+    if output.status.success() && xauth_file.exists() {
+        Some(xauth_file)
+    } else {
+        None
+    }
+}
+
 /// Probe directory for entries matching a prefix and return matching paths
 fn probe_runtime_sockets(runtime_dir: &Path, prefix: &str) -> Vec<PathBuf> {
     let mut sockets = Vec::new();
@@ -158,7 +203,14 @@ fn create_args_memfd(args: &[String]) -> anyhow::Result<RawFd> {
 }
 
 /// Generate bwrap options (without "bwrap" binary and without command)
-fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<String> {
+///
+/// `block_xauth` is the canonical path of the original XAUTHORITY file to mask
+/// with /dev/null inside the sandbox (used when a restricted token was generated).
+fn generate_bwrap_options(
+    policy: &SandboxPolicy,
+    session_tmpdir: &Path,
+    block_xauth: Option<&Path>,
+) -> Vec<String> {
     let mut options = Vec::new();
     
     // Unshare PID and IPC namespaces; die with parent (always)
@@ -230,6 +282,16 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
                 options.push("/dev/null".to_string());
                 options.push(s);
             }
+        }
+    }
+
+    // Block original XAUTHORITY file when a restricted token was generated,
+    // preventing the sandboxed process from bypassing the restriction.
+    if let Some(xauth_path) = block_xauth {
+        if let Some(canonical) = canonicalize_path(xauth_path) {
+            options.push("--ro-bind".to_string());
+            options.push("/dev/null".to_string());
+            options.push(canonical.to_string_lossy().to_string());
         }
     }
 
@@ -313,9 +375,10 @@ pub fn generate_bwrap_argv(
     args: &[String],
     session_tmpdir: &Path,
     bwrap_path: &Path,
+    block_xauth: Option<&Path>,
 ) -> Vec<String> {
     let mut argv = vec![bwrap_path.to_string_lossy().to_string()];
-    argv.extend(generate_bwrap_options(policy, session_tmpdir));
+    argv.extend(generate_bwrap_options(policy, session_tmpdir, block_xauth));
 
     // Command separator and the actual command
     argv.push("--".to_string());
@@ -343,11 +406,12 @@ pub fn run_sandboxed(
     // Filter environment according to policy, appending allow filters for GUI/audio vars.
     // Appended = lowest priority: explicit user filters earlier in the list still win.
     let mut ep = policy.env().clone();
+    // Original XAUTHORITY path to block in the sandbox when a restricted token is generated
+    let mut block_xauth: Option<PathBuf> = None;
     if policy.enable_gui() {
         for var in [
             "DISPLAY",
             "WAYLAND_DISPLAY",
-            "XAUTHORITY",
             "XDG_RUNTIME_DIR",
             "XCURSOR_THEME",
             "XCURSOR_SIZE",
@@ -356,6 +420,50 @@ pub fn run_sandboxed(
                 pattern: var.to_string(),
                 action: FilterAction::Allow,
             });
+        }
+
+        // For X11: generate a restricted untrusted auth token instead of passing the original.
+        // The file is written into session_tmpdir which is already bind-mounted into the sandbox.
+        // Falls back to passing through the original XAUTHORITY if xauth is unavailable or
+        // the X11 Security extension is not supported by the running X server.
+        if !ep.set.contains_key("XAUTHORITY") {
+            let display = std::env::var("DISPLAY").unwrap_or_default();
+            if !display.is_empty() {
+                match try_generate_restricted_xauth(&display, session_tmpdir) {
+                    Some(xauth_path) => {
+                        // Record the original XAUTHORITY so it can be blocked in the sandbox.
+                        // If unset or empty, fall back to the default ~/.Xauthority path.
+                        block_xauth = std::env::var("XAUTHORITY")
+                            .ok()
+                            .filter(|v| !v.is_empty())
+                            .map(PathBuf::from)
+                            .or_else(|| {
+                                dirs::home_dir().map(|h| h.join(".Xauthority"))
+                            });
+                        ep.set.insert(
+                            "XAUTHORITY".to_string(),
+                            xauth_path.to_string_lossy().to_string(),
+                        );
+                    }
+                    None => {
+                        verbose_warn!(
+                            "could not generate restricted X11 auth token \
+                             (xauth unavailable or X11 Security extension not supported); \
+                             falling back to original XAUTHORITY"
+                        );
+                        ep.filters.push(EnvFilter {
+                            pattern: "XAUTHORITY".to_string(),
+                            action: FilterAction::Allow,
+                        });
+                    }
+                }
+            } else {
+                // No X11 display (Wayland-only or headless); pass through XAUTHORITY if present
+                ep.filters.push(EnvFilter {
+                    pattern: "XAUTHORITY".to_string(),
+                    action: FilterAction::Allow,
+                });
+            }
         }
     }
     if policy.enable_audio() {
@@ -393,11 +501,12 @@ pub fn run_sandboxed(
     let filtered_env = filter_environment(&ep);
 
     // Generate bwrap options (without bwrap binary and without command)
-    let bwrap_options = generate_bwrap_options(policy, session_tmpdir);
+    let bwrap_options = generate_bwrap_options(policy, session_tmpdir, block_xauth.as_deref());
 
     // Log full command for debugging if verbose mode
     if verbose {
-        let full_argv = generate_bwrap_argv(policy, command, args, session_tmpdir, &bwrap_path);
+        let full_argv =
+            generate_bwrap_argv(policy, command, args, session_tmpdir, &bwrap_path, block_xauth.as_deref());
         eprintln!("[verbose] bwrap command (what would be passed via memfd):");
         eprintln!("[verbose]   {}", full_argv.join(" "));
     }
