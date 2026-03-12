@@ -176,6 +176,9 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
     options.push("--tmpfs".to_string());
     options.push("/tmp".to_string());
 
+    options.push("--tmpfs".to_string());
+    options.push("/run".to_string());
+
     // XDG_RUNTIME_DIR: mount as tmpfs (always, for isolation)
     let xdg_runtime_dir = get_xdg_runtime_dir();
     options.push("--tmpfs".to_string());
