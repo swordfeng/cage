@@ -1,7 +1,7 @@
 use crate::cli::Args;
 use crate::policy::merge::expand_path;
 use crate::policy::types::{Config, SandboxPolicy};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -332,10 +332,12 @@ mod tests {
         let policy = resolve_policy(&config, &args).unwrap();
 
         // Should include the extra writable path
-        assert!(policy
-            .writable_roots
-            .iter()
-            .any(|p| p.to_string_lossy().contains("/extra/path")));
+        assert!(
+            policy
+                .writable_roots
+                .iter()
+                .any(|p| p.to_string_lossy().contains("/extra/path"))
+        );
     }
 
     #[test]
@@ -366,10 +368,12 @@ mod tests {
         let config = load_test_config(&args).unwrap();
         let policy = resolve_policy(&config, &args).unwrap();
 
-        assert!(policy
-            .writable_roots
-            .iter()
-            .any(|p| p.to_string_lossy().contains("/extra/path")));
+        assert!(
+            policy
+                .writable_roots
+                .iter()
+                .any(|p| p.to_string_lossy().contains("/extra/path"))
+        );
         // Also confirm we got the strict policy (network = none)
         assert!(matches!(policy.network, Some(NetworkPolicy::None)));
     }

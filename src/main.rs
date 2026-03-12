@@ -1,7 +1,7 @@
 use anyhow::Context;
 use clap::Parser;
-use rand::rngs::OsRng;
 use rand::Rng;
+use rand::rngs::OsRng;
 use scopeguard::defer;
 use std::fs;
 use std::path::PathBuf;
@@ -79,7 +79,13 @@ fn run(args: cli::Args) -> anyhow::Result<i32> {
     }
 
     // Run command in sandbox
-    let exit_code = platform::run_sandboxed(&policy, &args.command, &args.args, &session_tmpdir, args.verbose)?;
+    let exit_code = platform::run_sandboxed(
+        &policy,
+        &args.command,
+        &args.args,
+        &session_tmpdir,
+        args.verbose,
+    )?;
 
     Ok(exit_code)
 }
@@ -190,9 +196,20 @@ fn print_debug_info(
         let bwrap_path = platform::linux::find_bwrap_binary()
             .unwrap_or_else(|| std::path::PathBuf::from("bwrap"));
         let bwrap_display = bwrap_path.to_string_lossy();
-        let argv = platform::linux::generate_bwrap_argv(policy, command, args, session_tmpdir, &bwrap_path);
+        let argv = platform::linux::generate_bwrap_argv(
+            policy,
+            command,
+            args,
+            session_tmpdir,
+            &bwrap_path,
+        );
         print("bwrap command:");
-        print(&format!("  {} --args <memfd> -- {} {}", bwrap_display, command, args.join(" ")));
+        print(&format!(
+            "  {} --args <memfd> -- {} {}",
+            bwrap_display,
+            command,
+            args.join(" ")
+        ));
         print("");
         print("Arguments passed via memfd:");
         print(&format!("  {}", argv[1..].join(" ")));
@@ -283,7 +300,11 @@ mod tests {
         let parts: Vec<&str> = name.split('-').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[2].len(), 8);
-        assert!(parts[2].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(
+            parts[2]
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
 
         // Cleanup test directory
         let _ = fs::remove_dir_all(&tmpdir);
@@ -299,8 +320,16 @@ mod tests {
         assert_eq!(component2.len(), 8);
 
         // Should be alphanumeric lowercase
-        assert!(component1.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
-        assert!(component2.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()));
+        assert!(
+            component1
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
+        assert!(
+            component2
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        );
 
         // Should be different (with very high probability)
         assert_ne!(component1, component2);

@@ -61,8 +61,8 @@ fn check_bwrap_prerequisites() -> Result<PathBuf> {
         let value: i32 = content.trim().parse().unwrap_or(1);
         if value == 0 {
             // Check if bwrap is setuid (which would work even without unprivileged userns)
-            let metadata =
-                std::fs::metadata(&bwrap_path).context("failed to check bwrap binary permissions")?;
+            let metadata = std::fs::metadata(&bwrap_path)
+                .context("failed to check bwrap binary permissions")?;
 
             let permissions = metadata.permissions();
             let is_setuid = permissions.mode() & 0o4000 != 0;
@@ -132,15 +132,12 @@ fn probe_runtime_sockets(runtime_dir: &Path, prefix: &str) -> Vec<PathBuf> {
 
 /// Create a memfd with null-separated bwrap arguments
 fn create_args_memfd(args: &[String]) -> anyhow::Result<RawFd> {
-    use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+    use nix::sys::memfd::{MemFdCreateFlag, memfd_create};
     use std::io::Seek;
     use std::os::unix::io::IntoRawFd;
 
-    let fd = memfd_create(
-        c"bwrap-args",
-        MemFdCreateFlag::empty(),
-    )
-    .with_context(|| "failed to create memfd for bwrap arguments")?;
+    let fd = memfd_create(c"bwrap-args", MemFdCreateFlag::empty())
+        .with_context(|| "failed to create memfd for bwrap arguments")?;
 
     // Convert to std::fs::File for easier manipulation
     let mut file = std::fs::File::from(fd);
@@ -286,9 +283,11 @@ fn generate_bwrap_options(policy: &SandboxPolicy, session_tmpdir: &Path) -> Vec<
             options.push("--unshare-net".to_string());
         }
         NetworkPolicy::Localhost => {
-            verbose_warn!("'localhost' network policy is not yet enforced; "
-                       "sandboxed process has full network access (same as 'full'). "
-                       "Seccomp-based filtering is planned for Phase 1b.");
+            verbose_warn!(concat!(
+                "'localhost' network policy is not yet enforced; ",
+                "sandboxed process has full network access (same as 'full'). ",
+                "Seccomp-based filtering is planned for Phase 1b."
+            ));
             options.push("--share-net".to_string());
         }
         NetworkPolicy::Full => {
@@ -332,7 +331,8 @@ pub fn run_sandboxed(
 ) -> Result<i32> {
     // Check prerequisites (bwrap availability and user namespace support)
     // Get the full path to bwrap binary from system global location
-    let bwrap_path = check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
+    let bwrap_path =
+        check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
 
     // Get XDG_RUNTIME_DIR for use in env setup
     let xdg_runtime_dir = get_xdg_runtime_dir();
@@ -341,27 +341,50 @@ pub fn run_sandboxed(
     // Appended = lowest priority: explicit user filters earlier in the list still win.
     let mut ep = policy.env().clone();
     if policy.enable_gui() {
-        for var in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
-                    "XCURSOR_THEME", "XCURSOR_SIZE"] {
-            ep.filters.push(EnvFilter { pattern: var.to_string(), action: FilterAction::Allow });
+        for var in [
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XAUTHORITY",
+            "XDG_RUNTIME_DIR",
+            "XCURSOR_THEME",
+            "XCURSOR_SIZE",
+        ] {
+            ep.filters.push(EnvFilter {
+                pattern: var.to_string(),
+                action: FilterAction::Allow,
+            });
         }
     }
     if policy.enable_audio() {
-        for var in ["PULSE_SERVER", "PULSE_COOKIE", "PIPEWIRE_REMOTE", "XDG_RUNTIME_DIR"] {
-            ep.filters.push(EnvFilter { pattern: var.to_string(), action: FilterAction::Allow });
+        for var in [
+            "PULSE_SERVER",
+            "PULSE_COOKIE",
+            "PIPEWIRE_REMOTE",
+            "XDG_RUNTIME_DIR",
+        ] {
+            ep.filters.push(EnvFilter {
+                pattern: var.to_string(),
+                action: FilterAction::Allow,
+            });
         }
     }
-    
+
     // Set TMPDIR to session_tmpdir if not explicitly configured in env policy
     if !ep.set.contains_key("TMPDIR") {
         if let Some(canonical) = canonicalize_path(session_tmpdir) {
-            ep.set.insert("TMPDIR".to_string(), canonical.to_string_lossy().to_string());
+            ep.set.insert(
+                "TMPDIR".to_string(),
+                canonical.to_string_lossy().to_string(),
+            );
         }
     }
 
     // Set XDG_RUNTIME_DIR if not explicitly configured in env policy
     if !ep.set.contains_key("XDG_RUNTIME_DIR") {
-        ep.set.insert("XDG_RUNTIME_DIR".to_string(), xdg_runtime_dir.to_string_lossy().to_string());
+        ep.set.insert(
+            "XDG_RUNTIME_DIR".to_string(),
+            xdg_runtime_dir.to_string_lossy().to_string(),
+        );
     }
 
     let filtered_env = filter_environment(&ep);
@@ -394,9 +417,9 @@ pub fn run_sandboxed(
     }
 
     // Execute and wait for completion
-    let status = cmd.status().with_context(|| {
-        "failed to execute bwrap command with memfd arguments"
-    });
+    let status = cmd
+        .status()
+        .with_context(|| "failed to execute bwrap command with memfd arguments");
 
     // Close the memfd in the parent process after spawn
     let _ = nix::unistd::close(args_fd);
