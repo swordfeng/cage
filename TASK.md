@@ -115,9 +115,9 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] Documented in `macos_notes.md`
 
 ### T1.15 — Windows GUI/Audio Support (`src/platform/windows.rs`)
-- [ ] Accept `enable_gui` and `enable_audio` in policy (no-op implementation - per user request)
-- [ ] Add documentation comment explaining Windows inherently supports GUI/audio, flags are for config compatibility
-- [ ] Update `generate_windows_sandbox_config` to log when these flags are set (for visibility in `--dry-run`)
+- [x] Accept `enable_gui` and `enable_audio` in policy (no-op implementation - per user request)
+- [x] Add documentation comment explaining Windows inherently supports GUI/audio, flags are for config compatibility
+- [x] Update `generate_windows_sandbox_config` to log when these flags are set (for visibility in `--dry-run`)
 
 ### T1.16 — Refine macOS Seatbelt sandbox rules
 - [x] Review and refine Seatbelt profile to use exact operations instead of wildcards where possible
