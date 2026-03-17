@@ -77,13 +77,13 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 - [x] `--dry-run`: also print generated bwrap argv or Seatbelt profile content; do not exec; exit 0
 
 ### T1.11 — Integration tests
-- [ ] `write_restricted_paths`: attempt to write to `$CWD/.git/COMMIT_EDITMSG`; assert `PermissionDenied`
-- [ ] `read_restricted_paths`: attempt to read a mock sensitive path (created in test fixture); assert `PermissionDenied`
-- [ ] `network = "none"`: attempt `curl`/`nc` to `8.8.8.8`; assert connection failure
-- [ ] `network = "full"`: attempt connection to localhost echo server; assert success
-- [ ] Env filtering: verify `*_TOKEN` pattern vars absent in child process env (blocklist mode)
-- [ ] Env filtering: verify only `PATH` present in child env (allowlist mode)
-- [ ] Run cage as subprocess via `Command`; check exit code forwarding
+- [x] `write_restricted_paths`: attempt to write to `$CWD/.git/COMMIT_EDITMSG`; assert `PermissionDenied`
+- [x] `read_restricted_paths`: attempt to read a mock sensitive path (created in test fixture); assert `PermissionDenied`
+- [x] `network = "none"`: attempt `curl`/`nc` to `8.8.8.8`; assert connection failure
+- [x] `network = "full"`: attempt connection to localhost echo server; assert success
+- [x] Env filtering: verify `*_TOKEN` pattern vars absent in child process env (blocklist mode)
+- [x] Env filtering: verify only `PATH` present in child env (allowlist mode)
+- [x] Run cage as subprocess via `Command`; check exit code forwarding
 
 ### T1.12 — GUI/Audio Policy Fields (`src/policy/types.rs`)
 - [x] Add `enable_gui: Option<bool>` to `SandboxPolicy` struct
