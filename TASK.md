@@ -151,14 +151,20 @@ Granular breakdown of [SPEC.md §11](SPEC.md#11-implementation-roadmap). Tasks r
 ## Phase 1b — Windows + Localhost Network (Weeks 4–5)
 
 ### T2.1 — Linux: seccomp supervisor for `localhost` network (`src/platform/linux.rs`)
-- [ ] Build BPF filter via `seccompiler`: `connect` syscall → `SECCOMP_RET_USER_NOTIF`, all others → `SECCOMP_RET_ALLOW`
-- [ ] Implement supervisor fork+exec flow per SPEC §5.1:
+- [x] Build BPF filter via `seccompiler`: `connect` syscall → `SECCOMP_RET_USER_NOTIF`, all others → `SECCOMP_RET_ALLOW`
+- [x] Implement supervisor fork+exec flow per SPEC §5.1:
   1. cage creates `socketpair(AF_UNIX, SOCK_SEQPACKET)`
   2. child forks, installs seccomp with `SECCOMP_FILTER_FLAG_NEW_LISTENER`, sends notification FD to cage via `SCM_RIGHTS`
   3. child execs `bwrap ...`; notification FD survives exec
-- [ ] cage supervisor thread: read `seccomp_notif` → read sockaddr from `/proc/<pid>/mem` → allow/deny → write `seccomp_notif_resp`
-- [ ] Allow: `AF_UNIX`, `AF_INET`/`AF_INET6` to `127.0.0.1`/`::1`. Deny all else with `ECONNREFUSED`
-- [ ] Kernel version check: require Linux ≥ 5.0; emit clear error if older
+- [x] cage supervisor thread: read `seccomp_notif` → read sockaddr from `/proc/<pid>/mem` → allow/deny → write `seccomp_notif_resp`
+- [x] Allow: `AF_UNIX`, `AF_INET`/`AF_INET6` to `127.0.0.1`/`::1`. Deny all else with `ECONNREFUSED`
+- [x] Kernel version check: require Linux ≥ 5.0; emit clear error if older
+
+**Implementation**: `src/platform/seccomp.rs` contains the seccomp supervisor implementation with:
+- BPF filter for trapping `connect()` syscall
+- Fork+exec flow with socketpair for notification FD transfer
+- Supervisor loop that reads `seccomp_notif`, validates target addresses, and responds
+- Address validation for AF_UNIX (always allowed) and localhost (127.0.0.1/::1)
 
 ### T2.2 — Windows: `cage-setup.exe` — initial setup (`src/bin/cage-setup.rs`)
 - [ ] Separate binary with UAC manifest requesting `requireAdministrator`

@@ -1,14 +1,21 @@
 use crate::policy::types::{EnvFilter, EnvPolicy, FilterAction, NetworkPolicy, SandboxPolicy};
 use crate::verbose_warn;
 use anyhow::{Context, Result};
+use nix::unistd::{fork, ForkResult};
 use std::collections::HashMap;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// System global install locations for bwrap, in order of preference
 pub const BWRAP_GLOBAL_PATHS: &[&str] = &["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"];
+
+/// Minimum kernel version required for seccomp user notification with
+/// SECCOMP_USER_NOTIF_FLAG_CONTINUE (Linux 5.5)
+const MIN_KERNEL_MAJOR_FOR_SECCOMP: u32 = 5;
+const MIN_KERNEL_MINOR_FOR_SECCOMP: u32 = 5;
 
 /// Find bwrap binary in system global install locations
 pub fn find_bwrap_binary() -> Option<PathBuf> {
@@ -95,6 +102,29 @@ fn filter_environment(env_policy: &EnvPolicy) -> HashMap<String, String> {
 /// Canonicalize a path, returning None if it doesn't exist
 fn canonicalize_path(path: &Path) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(path).ok()
+}
+
+/// Check the Linux kernel version, returns (major, minor)
+fn check_kernel_version() -> Result<(u32, u32)> {
+    let content = std::fs::read_to_string("/proc/version")?;
+    // Example: "Linux version 5.15.0-76-generic (buildd@lcy02-amd64-007) ..."
+    let version_part = content.split_whitespace().nth(2)
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse kernel version from /proc/version"))?;
+
+    let mut parts = version_part.split('.');
+    let major: u32 = parts.next()
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse major kernel version"))?
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid major kernel version"))?;
+
+    let minor_str = parts.next()
+        .ok_or_else(|| anyhow::anyhow!("Failed to parse minor kernel version"))?;
+    // Minor may contain non-numeric suffix (e.g. "15" from "5.15.0-76-generic")
+    let minor: u32 = minor_str
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid minor kernel version"))?;
+
+    Ok((major, minor))
 }
 
 /// Get XDG_RUNTIME_DIR path
@@ -353,11 +383,7 @@ fn generate_bwrap_options(
             options.push("--unshare-net".to_string());
         }
         NetworkPolicy::Localhost => {
-            verbose_warn!(concat!(
-                "'localhost' network policy is not yet enforced; ",
-                "sandboxed process has full network access (same as 'full'). ",
-                "Seccomp-based filtering is planned for Phase 1b."
-            ));
+            // Host network shared; seccomp supervisor filters connect() to localhost only
             options.push("--share-net".to_string());
         }
         NetworkPolicy::Full => {
@@ -388,26 +414,20 @@ pub fn generate_bwrap_argv(
     argv
 }
 
-pub fn run_sandboxed(
+fn prepare_sandbox(
     policy: &SandboxPolicy,
     command: &str,
     args: &[String],
     session_tmpdir: &Path,
-    verbose: bool,
-) -> Result<i32> {
-    // Check prerequisites (bwrap availability and user namespace support)
-    // Get the full path to bwrap binary from system global location
-    let bwrap_path =
-        check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
-
+    bwrap_path: &Path,
+) -> Result<(std::process::Command, RawFd)> {
     // Get XDG_RUNTIME_DIR for use in env setup
     let xdg_runtime_dir = get_xdg_runtime_dir();
 
     // Filter environment according to policy, appending allow filters for GUI/audio vars.
-    // Appended = lowest priority: explicit user filters earlier in the list still win.
     let mut ep = policy.env().clone();
-    // Original XAUTHORITY path to block in the sandbox when a restricted token is generated
     let mut block_xauth: Option<PathBuf> = None;
+    
     if policy.enable_gui() {
         for var in [
             "DISPLAY",
@@ -422,24 +442,16 @@ pub fn run_sandboxed(
             });
         }
 
-        // For X11: generate a restricted untrusted auth token instead of passing the original.
-        // The file is written into session_tmpdir which is already bind-mounted into the sandbox.
-        // Falls back to passing through the original XAUTHORITY if xauth is unavailable or
-        // the X11 Security extension is not supported by the running X server.
         if !ep.set.contains_key("XAUTHORITY") {
             let display = std::env::var("DISPLAY").unwrap_or_default();
             if !display.is_empty() {
                 match try_generate_restricted_xauth(&display, session_tmpdir) {
                     Some(xauth_path) => {
-                        // Record the original XAUTHORITY so it can be blocked in the sandbox.
-                        // If unset or empty, fall back to the default ~/.Xauthority path.
                         block_xauth = std::env::var("XAUTHORITY")
                             .ok()
                             .filter(|v| !v.is_empty())
                             .map(PathBuf::from)
-                            .or_else(|| {
-                                dirs::home_dir().map(|h| h.join(".Xauthority"))
-                            });
+                            .or_else(|| dirs::home_dir().map(|h| h.join(".Xauthority")));
                         ep.set.insert(
                             "XAUTHORITY".to_string(),
                             xauth_path.to_string_lossy().to_string(),
@@ -458,7 +470,6 @@ pub fn run_sandboxed(
                     }
                 }
             } else {
-                // No X11 display (Wayland-only or headless); pass through XAUTHORITY if present
                 ep.filters.push(EnvFilter {
                     pattern: "XAUTHORITY".to_string(),
                     action: FilterAction::Allow,
@@ -466,6 +477,7 @@ pub fn run_sandboxed(
             }
         }
     }
+    
     if policy.enable_audio() {
         for var in [
             "PULSE_SERVER",
@@ -480,7 +492,7 @@ pub fn run_sandboxed(
         }
     }
 
-    // Set TMPDIR to session_tmpdir if not explicitly configured in env policy
+    // Set TMPDIR to session_tmpdir if not explicitly configured
     if !ep.set.contains_key("TMPDIR") {
         if let Some(canonical) = canonicalize_path(session_tmpdir) {
             ep.set.insert(
@@ -490,7 +502,7 @@ pub fn run_sandboxed(
         }
     }
 
-    // Set XDG_RUNTIME_DIR if not explicitly configured in env policy
+    // Set XDG_RUNTIME_DIR if not explicitly configured
     if !ep.set.contains_key("XDG_RUNTIME_DIR") {
         ep.set.insert(
             "XDG_RUNTIME_DIR".to_string(),
@@ -500,24 +512,15 @@ pub fn run_sandboxed(
 
     let filtered_env = filter_environment(&ep);
 
-    // Generate bwrap options (without bwrap binary and without command)
+    // Generate bwrap options
     let bwrap_options = generate_bwrap_options(policy, session_tmpdir, block_xauth.as_deref());
 
-    // Log full command for debugging if verbose mode
-    if verbose {
-        let full_argv =
-            generate_bwrap_argv(policy, command, args, session_tmpdir, &bwrap_path, block_xauth.as_deref());
-        eprintln!("[verbose] bwrap command (what would be passed via memfd):");
-        eprintln!("[verbose]   {}", full_argv.join(" "));
-    }
-
     // Create memfd with bwrap arguments
-    // The returned fd will be inherited by bwrap (not CLOEXEC)
     let args_fd = create_args_memfd(&bwrap_options)
         .with_context(|| "failed to create memfd for bwrap arguments")?;
 
-    // Build command using full path to bwrap: <bwrap_path> --args <fd> -- <command> [args...]
-    let mut cmd = Command::new(&bwrap_path);
+    // Build command
+    let mut cmd = Command::new(bwrap_path);
     cmd.arg("--args").arg(args_fd.to_string()).arg("--");
     cmd.arg(command);
     cmd.args(args);
@@ -528,16 +531,153 @@ pub fn run_sandboxed(
         cmd.env(key, value);
     }
 
+    Ok((cmd, args_fd))
+}
+
+pub fn run_sandboxed(
+    policy: &SandboxPolicy,
+    command: &str,
+    args: &[String],
+    session_tmpdir: &Path,
+    verbose: bool,
+) -> Result<i32> {
+    // Check prerequisites
+    let bwrap_path =
+        check_bwrap_prerequisites().context("failed to verify bubblewrap prerequisites")?;
+
+    // For localhost network policy, we need a different approach with seccomp
+    if matches!(policy.network(), NetworkPolicy::Localhost) {
+        // Check kernel version (need >= 5.5 for SECCOMP_USER_NOTIF_FLAG_CONTINUE)
+        let (kmajor, kminor) = check_kernel_version()?;
+        if kmajor < MIN_KERNEL_MAJOR_FOR_SECCOMP
+            || (kmajor == MIN_KERNEL_MAJOR_FOR_SECCOMP && kminor < MIN_KERNEL_MINOR_FOR_SECCOMP)
+        {
+            return Err(anyhow::anyhow!(
+                "Seccomp-based localhost networking requires Linux kernel {}.{} or later, \
+                but running on kernel {}.{}",
+                MIN_KERNEL_MAJOR_FOR_SECCOMP, MIN_KERNEL_MINOR_FOR_SECCOMP,
+                kmajor, kminor
+            ));
+        }
+
+        if verbose {
+            eprintln!("[verbose] Using seccomp supervisor for localhost network policy");
+        }
+
+        // Create socketpair for parent-child communication
+        let (parent_sock, child_sock) = crate::platform::seccomp::create_socketpair()
+            .context("Failed to create socketpair for seccomp supervision")?;
+
+        // Fork for seccomp supervision
+        match unsafe { fork() } {
+            Ok(ForkResult::Parent { child }) => {
+                // Parent: close child socket, receive notify_fd, run supervisor
+                drop(child_sock);
+                
+                let parent_fd = parent_sock.as_raw_fd();
+                let notify_fd = crate::platform::seccomp::recv_fd(parent_fd)
+                    .context("Failed to receive notification FD from child")?;
+                drop(parent_sock);
+
+                // Spawn supervisor thread
+                let supervisor_handle = std::thread::spawn(move || {
+                    if let Err(e) = crate::platform::seccomp::run_supervisor(notify_fd, child) {
+                        eprintln!("[cage] Seccomp supervisor error: {}", e);
+                    }
+                });
+
+                // Wait for child to complete
+                let wait_result = nix::sys::wait::waitpid(child, None)?;
+                
+                // Wait for supervisor to finish
+                supervisor_handle.join().ok();
+
+                // Extract exit code
+                let exit_code = match wait_result {
+                    nix::sys::wait::WaitStatus::Exited(_, code) => code,
+                    nix::sys::wait::WaitStatus::Signaled(_, sig, _) => 128 + sig as i32,
+                    _ => 1,
+                };
+
+                return Ok(exit_code);
+            }
+            Ok(ForkResult::Child) => {
+                // Child: close parent socket, install seccomp, send notify_fd, exec bwrap
+                drop(parent_sock);
+                
+                let child_fd = child_sock.as_raw_fd();
+                if let Err(e) = run_seccomp_child(policy, command, args, session_tmpdir, &bwrap_path, child_fd, verbose) {
+                    eprintln!("[cage] Child process error: {}", e);
+                    std::process::exit(1);
+                }
+                // run_seccomp_child calls exec(), which replaces the process
+                // So if we get here, exec failed and we already returned Err
+                std::process::exit(1);
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Fork failed for seccomp supervision: {}", e));
+            }
+        }
+    }
+
+    // Standard execution without seccomp
+    let (mut cmd, args_fd) = prepare_sandbox(policy, command, args, session_tmpdir, &bwrap_path)?;
+
+    // Log full command for debugging if verbose mode
+    if verbose {
+        let full_argv =
+            generate_bwrap_argv(policy, command, args, session_tmpdir, &bwrap_path, None);
+        eprintln!("[verbose] bwrap command:");
+        eprintln!("[verbose]   {}", full_argv.join(" "));
+    }
+
     // Execute and wait for completion
     let status = cmd
         .status()
-        .with_context(|| "failed to execute bwrap command with memfd arguments");
+        .with_context(|| "failed to execute bwrap command with memfd arguments")?;
 
-    // Close the memfd in the parent process after spawn
+    // Close the memfd
     let _ = nix::unistd::close(args_fd);
 
-    // Return exit code
-    Ok(status?.code().unwrap_or(1))
+    Ok(status.code().unwrap_or(1))
+}
+
+/// Run in child process with seccomp filter installed
+fn run_seccomp_child(
+    policy: &SandboxPolicy,
+    command: &str,
+    args: &[String],
+    session_tmpdir: &Path,
+    bwrap_path: &Path,
+    parent_sock_fd: RawFd,
+    verbose: bool,
+) -> Result<()> {
+    use crate::platform::seccomp::{install_seccomp_filter, send_fd};
+
+    // Install seccomp filter and get notification FD
+    let notify_fd = install_seccomp_filter()
+        .context("Failed to install seccomp filter")?;
+
+    // Send notification FD to parent
+    send_fd(parent_sock_fd, notify_fd)
+        .context("Failed to send notification FD to parent")?;
+
+    // Close the socket
+    let _ = nix::unistd::close(parent_sock_fd);
+
+    // Prepare and exec bwrap
+    let (mut cmd, args_fd) = prepare_sandbox(policy, command, args, session_tmpdir, bwrap_path)?;
+
+    if verbose {
+        eprintln!("[verbose] Child: execing bwrap with seccomp filter");
+    }
+
+    // Exec bwrap - this replaces the current process
+    let err = cmd.exec();
+    
+    // If we get here, exec failed
+    let _ = nix::unistd::close(args_fd);
+    Err(anyhow::anyhow!("Failed to exec bwrap: {}", err))
 }
 
 #[cfg(test)]
