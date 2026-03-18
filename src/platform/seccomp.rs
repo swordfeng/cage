@@ -57,60 +57,52 @@ pub const AF_INET6: u16 = 10;
 /// seccomp_notif_resp flag to continue the syscall in-kernel (Linux >= 5.5)
 const SECCOMP_USER_NOTIF_FLAG_CONTINUE: u32 = 1;
 
+// BPF instruction constants (from linux/bpf_common.h and linux/filter.h)
+const BPF_LD: u16 = 0x00;
+const BPF_W: u16 = 0x00;
+const BPF_ABS: u16 = 0x20;
+const BPF_JMP: u16 = 0x05;
+const BPF_JEQ: u16 = 0x10;
+const BPF_K: u16 = 0x00;
+const BPF_RET: u16 = 0x06;
+
+// Seccomp return values (from linux/seccomp.h)
+const SECCOMP_RET_ALLOW: u32 = 0x7FFF0000;
+const SECCOMP_RET_USER_NOTIF: u32 = 0x7FC00000;
+
+macro_rules! bpf_stmt {
+    ($code:expr, $k:expr) => {
+        libc::sock_filter {
+            code: $code,
+            jt: 0,
+            jf: 0,
+            k: $k,
+        }
+    };
+}
+
+macro_rules! bpf_jump {
+    ($code:expr, $k:expr, $jt:expr, $jf:expr) => {
+        libc::sock_filter {
+            code: $code,
+            jt: $jt,
+            jf: $jf,
+            k: $k,
+        }
+    };
+}
+
 pub fn install_seccomp_filter() -> Result<RawFd> {
     let connect_syscall = libc::SYS_connect as u32;
 
     // BPF program: trap connect() syscall with USER_NOTIF, allow others
-    // Instructions (indices 0-5):
-    //   [0] Load arch
-    //   [1] JEQ AUDIT_ARCH → match: fall through (jt=0), no match: skip to ALLOW at [5] (jf=3)
-    //   [2] Load syscall number
-    //   [3] JEQ connect → match: fall through to USER_NOTIF at [4] (jt=0), no match: skip to ALLOW at [5] (jf=1)
-    //   [4] RET USER_NOTIF
-    //   [5] RET ALLOW
     let bpf_instructions: Vec<libc::sock_filter> = vec![
-        // [0] Load architecture (seccomp_data.arch at offset 4)
-        libc::sock_filter {
-            code: 0x20,
-            jt: 0,
-            jf: 0,
-            k: 4,
-        },
-        // [1] If arch matches, fall through (jt=0); else jump to ALLOW (jf=3 → instruction 5)
-        libc::sock_filter {
-            code: 0x15,
-            jt: 0,
-            jf: 3,
-            k: AUDIT_ARCH,
-        },
-        // [2] Load syscall number (seccomp_data.nr at offset 0)
-        libc::sock_filter {
-            code: 0x20,
-            jt: 0,
-            jf: 0,
-            k: 0,
-        },
-        // [3] If connect, fall through to USER_NOTIF (jt=0); else jump to ALLOW (jf=1 → instruction 5)
-        libc::sock_filter {
-            code: 0x15,
-            jt: 0,
-            jf: 1,
-            k: connect_syscall,
-        },
-        // [4] Return USER_NOTIF for connect
-        libc::sock_filter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: 0x7FC00000,
-        },
-        // [5] ALLOW: Return ALLOW for everything else
-        libc::sock_filter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: 0x7FFF0000,
-        },
+        bpf_stmt!(BPF_LD | BPF_W | BPF_ABS, 4),                       // load arch
+        bpf_jump!(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 0, 3),      // check arch
+        bpf_stmt!(BPF_LD | BPF_W | BPF_ABS, 0),                       // load syscall nr
+        bpf_jump!(BPF_JMP | BPF_JEQ | BPF_K, connect_syscall, 0, 1), // check connect
+        bpf_stmt!(BPF_RET, SECCOMP_RET_USER_NOTIF),                   // trap connect
+        bpf_stmt!(BPF_RET, SECCOMP_RET_ALLOW),                        // allow rest
     ];
 
     let prog = libc::sock_fprog {
